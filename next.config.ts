@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
   experimental: {
     authInterrupts: true,
   },
+  // Evita que "next dev" regenere AGENTS.md/CLAUDE.md automaticamente.
+  agentRules: false,
 };
 
 export default nextConfig;
