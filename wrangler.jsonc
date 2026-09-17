@@ -13,5 +13,11 @@
   // src/lib/db/client.ts, spike S1-04).
   "observability": {
     "enabled": true
-  }
+  },
+  // Apagado a proposito (ver CHANGELOG.md): el Worker sigue desplegado en la
+  // cuenta para poder redesplegar rapido, pero sin ruta publica en
+  // *.workers.dev hasta que el dominio real (kortexbarber.com) este listo.
+  // Poner en `true`, correr `npm run deploy`, y luego volver a `false` +
+  // redeploy cuando se necesite revisar algo puntual.
+  "workers_dev": false
 }
