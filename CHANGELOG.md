@@ -1,5 +1,15 @@
 # CHANGELOG — Kortex
 
+## Pendiente a futuro (no es F2/F3, anotar para no olvidar)
+
+- **Landing page de marketing** para promocionar Kortex como servicio (no la
+  plataforma en sí): una página donde un dueño de barbería que no es cliente
+  todavía pueda conocer el producto y ver una vista previa de lo que ofrece.
+  Williams pidió explícitamente dejarlo para cuando el producto esté listo
+  (post-MVP). Cuando se retome, probablemente conviene usar de nuevo
+  `brand-strategist`/`graphic-designer` (ya tienen el brand brief) más un
+  `copywriter` para el texto de venta.
+
 ## 2026-09-17 — Cierre de sesión F2: fix de build + deploy privado
 
 Tras integrar los 4 bloques de F2 (agenda, reserva pública, fila realtime,
