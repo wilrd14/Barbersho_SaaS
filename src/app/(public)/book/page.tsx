@@ -1,10 +1,10 @@
-export default function BookPage() {
-  return (
-    <div className="p-8">
-      <h1 className="text-xl font-semibold">Reservar cita</h1>
-      <p className="text-muted-foreground">
-        Flujo de reserva publica — placeholder Sprint 1 (F2).
-      </p>
-    </div>
-  );
+import { redirect } from "next/navigation";
+
+/**
+ * D-F2-3 · `/book` sin `chainSlug` no tiene tenant ni branding. Se conserva
+ * como redirect legacy hacia la landing de seleccion de cadena — el wizard
+ * real vive en `/[chainSlug]/book`.
+ */
+export default function LegacyBookRedirect() {
+  redirect("/");
 }
