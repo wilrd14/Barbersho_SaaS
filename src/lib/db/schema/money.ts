@@ -10,7 +10,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { chains, locations, users } from "./core";
-import { clients, services } from "./catalog";
+import { appointments, clients, services } from "./catalog";
 import {
   boothRentFrequency,
   commissionAppliesTo,
@@ -67,7 +67,13 @@ export const sales = pgTable("sales", {
   locationId: uuid("location_id")
     .notNull()
     .references(() => locations.id, { onDelete: "restrict" }),
-  appointmentId: uuid("appointment_id"),
+  // F2-01: FK que S1 dejo sin declarar. on delete set null: la venta ya
+  // cobrada sobrevive si la cita se borra (no deberia pasar en operacion
+  // normal). El indice unico parcial (0002_f2_integrity.sql) impide cobrar
+  // la misma cita dos veces.
+  appointmentId: uuid("appointment_id").references(() => appointments.id, {
+    onDelete: "set null",
+  }),
   clientId: uuid("client_id")
     .notNull()
     .references(() => clients.id, { onDelete: "restrict" }),

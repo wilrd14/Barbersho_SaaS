@@ -15,6 +15,20 @@
       "when": 1789598801137,
       "tag": "0001_rls_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789598801138,
+      "tag": "0002_f2_integrity",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789598801139,
+      "tag": "0003_realtime_walk_in_queue",
+      "breakpoints": true
     }
   ]
 }
