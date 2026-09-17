@@ -1,3 +1,5 @@
+import Link from "next/link"
+
 import { loadAttendingNow } from "@/lib/actions/queue"
 
 /**
@@ -37,10 +39,23 @@ export async function AttendingNowSection({ locationId }: { locationId: string }
         entries.map((entry) => {
           const range = formatRange(entry.startsAt, entry.endsAt, timezone)
           return (
-            <p key={entry.barberId} className="text-body-s text-(--text-secondary)">
-              {entry.barberName} → {entry.clientName ? entry.clientName : "(libre)"}
-              {entry.serviceName ? ` · ${entry.serviceName}` : ""}
-              {range ? ` · ${range}` : ""}
+            <p
+              key={entry.barberId}
+              className="flex flex-wrap items-center justify-between gap-2 text-body-s text-(--text-secondary)"
+            >
+              <span>
+                {entry.barberName} → {entry.clientName ? entry.clientName : "(libre)"}
+                {entry.serviceName ? ` · ${entry.serviceName}` : ""}
+                {range ? ` · ${range}` : ""}
+              </span>
+              {entry.appointmentId ? (
+                <Link
+                  href={`/sede/${locationId}/checkout?appointmentId=${entry.appointmentId}`}
+                  className="text-body-s font-medium text-(--accent) hover:underline"
+                >
+                  Cobrar
+                </Link>
+              ) : null}
             </p>
           )
         })

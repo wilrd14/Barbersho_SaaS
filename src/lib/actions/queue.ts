@@ -798,6 +798,7 @@ export async function getQueueSnapshotAction(
 export type AttendingNowEntry = {
   barberId: string;
   barberName: string;
+  appointmentId: string | null;
   clientName: string | null;
   serviceName: string | null;
   startsAt: string | null;
@@ -813,6 +814,7 @@ export async function loadAttendingNow(locationId: string): Promise<AttendingNow
       .where(and(eq(barberLocations.locationId, locationId), eq(barberLocations.isActive, true))),
     db
       .select({
+        appointmentId: appointments.id,
         barberId: appointments.barberId,
         clientId: appointments.clientId,
         serviceId: appointments.serviceId,
@@ -843,6 +845,7 @@ export async function loadAttendingNow(locationId: string): Promise<AttendingNow
     return {
       barberId: barber.id,
       barberName: barber.fullName ?? "Sin nombre",
+      appointmentId: row?.appointmentId ?? null,
       clientName: row ? clientNameById.get(row.clientId) ?? "Cliente" : null,
       serviceName: row ? serviceNameById.get(row.serviceId) ?? null : null,
       startsAt: row ? row.startsAt.toISOString() : null,

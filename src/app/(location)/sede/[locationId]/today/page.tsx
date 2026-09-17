@@ -16,6 +16,7 @@ import { AttendingNowSection } from "@/components/kortex/attending-now"
 import { QueueLiveBadge } from "@/components/kortex/queue-live-badge"
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "cn"
+import { loadCashRegisterState } from "@/lib/actions/cash-register"
 
 /**
  * F2-05 · "El Dia" — shell de la sede (UX-BRIEF §4.2). KPI compacto +
@@ -42,10 +43,11 @@ export default async function TodayPage({
   const now = new Date()
   const todayISO = resolveDateInTimezone(now, timezone)
 
-  const [agenda, kpis, services] = await Promise.all([
+  const [agenda, kpis, services, cashRegister] = await Promise.all([
     getLocationDayAgenda(locationId, todayISO),
     getLocationDayKpis(locationId, todayISO, now),
     getLocationActiveServices(locationId),
+    loadCashRegisterState(locationId),
   ])
 
   if (!agenda) {
@@ -67,6 +69,24 @@ export default async function TodayPage({
       <header>
         <h1 className="text-h1">El Dia — {agenda.location.name}</h1>
         <p className="text-body-s text-(--text-tertiary)">ambito: {scope.effectiveRole}</p>
+        {/* F2-20 AC: la caja abierta se muestra en El Dia con quien la abrio y a que hora. */}
+        {cashRegister.openSession ? (
+          <p className="text-body-s text-(--data-pos)">
+            Caja abierta por {cashRegister.openSession.openedByName} ·{" "}
+            {new Intl.DateTimeFormat("es-DO", {
+              timeZone: timezone,
+              hour: "numeric",
+              minute: "2-digit",
+            }).format(new Date(cashRegister.openSession.openedAt))}
+          </p>
+        ) : (
+          <Link
+            href={`/sede/${locationId}/register`}
+            className="text-body-s text-(--data-warn) hover:underline"
+          >
+            Caja cerrada — abrir caja para poder cobrar
+          </Link>
+        )}
       </header>
 
       <section className="grid grid-cols-2 gap-4 rounded-md border border-(--border) p-4 sm:grid-cols-3">
