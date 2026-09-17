@@ -1,5 +1,57 @@
 # CHANGELOG — Kortex
 
+## 2026-09-17 — F2 Bloque F: seed con dia operativo (F2-24)
+
+Extiende `src/lib/db/seed.ts` (`npm run db:seed`) con un dia operativo real
+para la sede Naco, siguiendo el mismo patron de idempotencia del resto del
+archivo (UUIDs fijos + `onConflictDoUpdate`). No se toco ninguna migracion,
+schema ni Server Action.
+
+**Agregado, todo anclado a `now` (nunca a fecha/hora fija, regla dura §3.9):**
+- **8 citas de hoy** en Naco, repartidas entre los 3 barberos de esa sede
+  (`barbero1`, `barbero2`, y el barbero multi-sede `barbero3`): 3
+  `confirmed` (empiezan despues de `now`), 2 `in_progress` (`now` cae dentro
+  de `[starts_at, ends_at)`, para el KPI de sillas ocupadas) y 3 `completed`
+  (ya terminaron, con `price_at_booking` congelado, para el KPI de ingreso
+  del dia — `getLocationDayKpis` lee `appointments`, no `sales`). Los rangos
+  por barbero no se solapan (respeta el `EXCLUDE` de `0002_f2_integrity.sql`).
+- **3 turnos en `walk_in_queue`** en estado `waiting` para Naco, `joined_at`
+  escalonado (-15/-10/-5 min de `now`) con `position` 1..3, uno con
+  `preferred_barber_id`.
+- **1 `cash_session` de hoy abierta** en Naco (`closed_at = null`) y **1 de
+  ayer ya cerrada**, con `expected_cash`/`counted_cash`/`difference`
+  calculados a mano en centavos-como-string (nunca `Number` en el monto
+  persistido): apertura RD$2000.00 + RD$1287.50 en ventas `cash` de ayer =
+  esperado RD$3287.50, contado RD$3280.00, descuadre de -RD$7.50 (para que
+  el cierre tenga algo real que reconciliar).
+- **5 `sales` de ayer** (efectivo x3, tarjeta x1, transferencia x1) con su
+  `sale_item` cada una, todas `status = 'paid'` contra la caja de ayer ya
+  cerrada, sin `appointment_id` (ventas libres de mostrador, permitido por la
+  tarea). Una de ellas con descuento (`discount_reason` obligatorio, D-F2-10).
+
+**Bug de idempotencia pre-existente corregido en `seedSchedules` (mismo
+archivo, tocado porque F2-24 lo necesitaba):** el chequeo de "ya sembrado"
+consultaba si el usuario tenia *alguna* fila en `schedules` en cada iteracion
+del loop de dias, asi que tras insertar el primer dia el resto se saltaba
+silenciosamente — en la practica, el barbero multi-sede (`barbero3`) solo
+terminaba con **un** bloque (lunes en Naco) en vez de lun-mie Naco / jue-sab
+Bella Vista. Se cambio el chequeo a la fila exacta
+`(user_id, location_id, day_of_week)`: sigue siendo idempotente corrida a
+corrida y ademas autorepara una base ya afectada por el bug viejo (verificado
+contra el proyecto Supabase real: antes de este fix `barbero3` tenia 1 fila,
+despues de correr el seed dos veces tiene las 6 correctas, sin duplicar).
+De paso se completaron los horarios de `barbero1` y `barbero2` (Naco,
+lun-sab) — no tenian **ninguno** sembrado, asi que nunca aparecian como
+columna en la rejilla de agenda de F2-06 (que lee `schedules` para saber que
+barberos tienen turno ese dia); sin esto, las citas de hoy que este seed les
+asigna quedarian huerfanas de columna.
+
+**Verificado contra el proyecto Supabase real de `.env.local`, no solo
+localmente:** `npm run db:seed` corrido dos veces seguidas no duplica
+ninguna fila (chequeado con `count(*)` agrupado por fila logica en
+`appointments`, `walk_in_queue`, `cash_sessions`, `sales`, `sale_items` y
+`schedules`) ni falla. `typecheck`, `lint` y `test` en verde.
+
 ## 2026-09-17 — F2 Bloque E: cobro y caja (F2-20..F2-23)
 
 Server Actions y pantallas de `(location)/sede/[locationId]/checkout` y

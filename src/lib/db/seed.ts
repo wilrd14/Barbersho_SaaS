@@ -1,21 +1,26 @@
 import { config } from "dotenv";
 config({ path: ".env.local" });
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "./client";
 import {
+  appointments,
   barberLocations,
+  cashSessions,
   chains,
   clients,
   commissionRules,
   locationServiceOverrides,
   locations,
   memberships,
+  saleItems,
+  sales,
   schedules,
   services,
   subscriptions,
   users,
+  walkInQueue,
 } from "./schema";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
@@ -67,6 +72,57 @@ const WALK_IN_CLIENT_IDS = [
   "00000000-0000-0000-0000-000000000702",
   "00000000-0000-0000-0000-000000000703",
 ];
+
+// F2-24: dia operativo de hoy/ayer en Naco. IDs fijos nuevos, sin chocar con
+// los de arriba (que llegan hasta ...703 / ...601).
+const APPOINTMENT_TODAY_IDS = [
+  "00000000-0000-0000-0000-000000000801", // b1 completed
+  "00000000-0000-0000-0000-000000000802", // b1 in_progress
+  "00000000-0000-0000-0000-000000000803", // b1 confirmed
+  "00000000-0000-0000-0000-000000000804", // b2 completed
+  "00000000-0000-0000-0000-000000000805", // b2 completed
+  "00000000-0000-0000-0000-000000000806", // b2 confirmed
+  "00000000-0000-0000-0000-000000000807", // b3 in_progress
+  "00000000-0000-0000-0000-000000000808", // b3 confirmed
+];
+
+const WALK_IN_QUEUE_IDS = [
+  "00000000-0000-0000-0000-000000000901",
+  "00000000-0000-0000-0000-000000000902",
+  "00000000-0000-0000-0000-000000000903",
+];
+
+const CASH_SESSION_TODAY_ID = "00000000-0000-0000-0000-000000001001";
+const CASH_SESSION_YESTERDAY_ID = "00000000-0000-0000-0000-000000001002";
+
+const SALE_YESTERDAY_IDS = [
+  "00000000-0000-0000-0000-000000001101",
+  "00000000-0000-0000-0000-000000001102",
+  "00000000-0000-0000-0000-000000001103",
+  "00000000-0000-0000-0000-000000001104",
+  "00000000-0000-0000-0000-000000001105",
+];
+
+const SALE_ITEM_YESTERDAY_IDS = [
+  "00000000-0000-0000-0000-000000001201",
+  "00000000-0000-0000-0000-000000001202",
+  "00000000-0000-0000-0000-000000001203",
+  "00000000-0000-0000-0000-000000001204",
+  "00000000-0000-0000-0000-000000001205",
+];
+
+// Precios efectivos ya sembrados para Naco (D-F2-1): Fade tiene override a
+// RD$500 en Naco (seedServiceOverrides); el resto usa el precio de catalogo.
+const NACO_PRICE = {
+  corte: "350.00",
+  fade: "500.00",
+  barba: "250.00",
+  fadeBarba: "650.00",
+};
+
+function minutesFromNow(now: Date, minutes: number): Date {
+  return new Date(now.getTime() + minutes * 60_000);
+}
 
 interface SeedAuthUser {
   id: string;
@@ -300,30 +356,54 @@ async function seedBarberLocations() {
 
 async function seedSchedules() {
   // Barbero multi-sede: lun-mie en Naco, jue-sab en Bella Vista (sin solapamiento).
-  const rows = [
-    { locationId: LOCATION_NACO, days: [1, 2, 3] },
-    { locationId: LOCATION_BELLA_VISTA, days: [4, 5, 6] },
-  ];
+  // F2-24: se corrige aqui un bug de idempotencia pre-existente — el chequeo
+  // grueso original consultaba "el usuario ya tiene ALGUNA fila" en cada dia
+  // del loop, asi que tras insertar el primer dia ya encontraba una fila y
+  // saltaba el resto (en la practica, el barbero multi-sede solo terminaba
+  // con lunes en Naco, nunca el bloque completo). Ahora se chequea la fila
+  // exacta (userId, locationId, dayOfWeek) antes de cada insert: es idempotente
+  // corrida a corrida **y** autorepara bases ya afectadas por el bug viejo.
+  // Tambien se completan b1 y b2 (Naco, mono-sede), que no tenian NINGUN
+  // horario sembrado y por eso nunca aparecian como columna en la rejilla de
+  // agenda (F2-06 lee `schedules` para saber que barberos tienen turno ese dia).
+  const blocksByUser = new Map<string, { locationId: string; days: number[] }[]>([
+    [
+      MULTI_LOCATION_BARBER_ID,
+      [
+        { locationId: LOCATION_NACO, days: [1, 2, 3] },
+        { locationId: LOCATION_BELLA_VISTA, days: [4, 5, 6] },
+      ],
+    ],
+    [BARBER_IDS[0], [{ locationId: LOCATION_NACO, days: [1, 2, 3, 4, 5, 6] }]],
+    [BARBER_IDS[1], [{ locationId: LOCATION_NACO, days: [1, 2, 3, 4, 5, 6] }]],
+  ]);
 
-  for (const block of rows) {
-    for (const dayOfWeek of block.days) {
-      const existing = await db
-        .select({ id: schedules.id })
-        .from(schedules)
-        .where(eq(schedules.userId, MULTI_LOCATION_BARBER_ID))
-        .limit(1000);
+  for (const [userId, blocks] of blocksByUser) {
+    for (const block of blocks) {
+      for (const dayOfWeek of block.days) {
+        const existing = await db
+          .select({ id: schedules.id })
+          .from(schedules)
+          .where(
+            and(
+              eq(schedules.userId, userId),
+              eq(schedules.locationId, block.locationId),
+              eq(schedules.dayOfWeek, dayOfWeek),
+            ),
+          )
+          .limit(1);
 
-      const alreadyHasDay = existing.length > 0; // simplificado: chequeo grueso de idempotencia
-      if (alreadyHasDay) continue;
+        if (existing.length > 0) continue; // ya sembrado en una corrida anterior
 
-      await db.insert(schedules).values({
-        userId: MULTI_LOCATION_BARBER_ID,
-        locationId: block.locationId,
-        dayOfWeek,
-        startTime: "09:00",
-        endTime: "20:00",
-        isActive: true,
-      });
+        await db.insert(schedules).values({
+          userId,
+          locationId: block.locationId,
+          dayOfWeek,
+          startTime: "09:00",
+          endTime: "20:00",
+          isActive: true,
+        });
+      }
     }
   }
 }
@@ -468,6 +548,448 @@ async function seedClients() {
   }
 }
 
+/**
+ * F2-24: dia operativo de hoy para Naco. 8 citas repartidas entre los 3
+ * barberos de Naco, ancladas a `now` (nunca a una fecha fija) para que el
+ * seed siga siendo util corriendolo cualquier dia:
+ *  - completed: ya terminaron antes de `now` (KPI de ingreso del dia).
+ *  - in_progress: `now` cae dentro de [startsAt, endsAt) (KPI de sillas
+ *    ocupadas ahora).
+ *  - confirmed: empiezan despues de `now` (agenda del resto del dia).
+ * Los rangos por barbero no se solapan entre si (respeta el EXCLUDE
+ * constraint de 0002_f2_integrity.sql).
+ */
+async function seedTodayAppointments(now: Date) {
+  const barberNaco1 = BARBER_IDS[0];
+  const barberNaco2 = BARBER_IDS[1];
+  const barberNaco3 = MULTI_LOCATION_BARBER_ID; // primario en Naco
+
+  const rows: {
+    id: string;
+    barberId: string;
+    clientId: string;
+    serviceId: string;
+    price: string;
+    durationMinutes: number;
+    startOffsetMinutes: number;
+    status: "confirmed" | "in_progress" | "completed";
+  }[] = [
+    // Barbero 1
+    {
+      id: APPOINTMENT_TODAY_IDS[0],
+      barberId: barberNaco1,
+      clientId: WALK_IN_CLIENT_IDS[0],
+      serviceId: SERVICE_FADE,
+      price: NACO_PRICE.fade,
+      durationMinutes: 40,
+      startOffsetMinutes: -180,
+      status: "completed",
+    },
+    {
+      id: APPOINTMENT_TODAY_IDS[1],
+      barberId: barberNaco1,
+      clientId: WALK_IN_CLIENT_IDS[1],
+      serviceId: SERVICE_CORTE,
+      price: NACO_PRICE.corte,
+      durationMinutes: 30,
+      startOffsetMinutes: -10,
+      status: "in_progress",
+    },
+    {
+      id: APPOINTMENT_TODAY_IDS[2],
+      barberId: barberNaco1,
+      clientId: WALK_IN_CLIENT_IDS[2],
+      serviceId: SERVICE_BARBA,
+      price: NACO_PRICE.barba,
+      durationMinutes: 20,
+      startOffsetMinutes: 120,
+      status: "confirmed",
+    },
+    // Barbero 2
+    {
+      id: APPOINTMENT_TODAY_IDS[3],
+      barberId: barberNaco2,
+      clientId: WALK_IN_CLIENT_IDS[1],
+      serviceId: SERVICE_CORTE,
+      price: NACO_PRICE.corte,
+      durationMinutes: 30,
+      startOffsetMinutes: -240,
+      status: "completed",
+    },
+    {
+      id: APPOINTMENT_TODAY_IDS[4],
+      barberId: barberNaco2,
+      clientId: WALK_IN_CLIENT_IDS[2],
+      serviceId: SERVICE_BARBA,
+      price: NACO_PRICE.barba,
+      durationMinutes: 20,
+      startOffsetMinutes: -120,
+      status: "completed",
+    },
+    {
+      id: APPOINTMENT_TODAY_IDS[5],
+      barberId: barberNaco2,
+      clientId: WALK_IN_CLIENT_IDS[0],
+      serviceId: SERVICE_FADE_BARBA,
+      price: NACO_PRICE.fadeBarba,
+      durationMinutes: 55,
+      startOffsetMinutes: 180,
+      status: "confirmed",
+    },
+    // Barbero 3 (multi-sede, primario en Naco)
+    {
+      id: APPOINTMENT_TODAY_IDS[6],
+      barberId: barberNaco3,
+      // Los clientes con user_id (CLIENT_USER_IDS) se insertan con id
+      // aleatorio (onConflictDoNothing por telefono en seedClients) — no hay
+      // un id fijo para referenciar via FK. Se usan los walk-in, que si
+      // tienen id fijo (clients.id = WALK_IN_CLIENT_IDS[n]).
+      clientId: WALK_IN_CLIENT_IDS[0],
+      serviceId: SERVICE_FADE,
+      price: NACO_PRICE.fade,
+      durationMinutes: 40,
+      startOffsetMinutes: -5,
+      status: "in_progress",
+    },
+    {
+      id: APPOINTMENT_TODAY_IDS[7],
+      barberId: barberNaco3,
+      clientId: WALK_IN_CLIENT_IDS[1],
+      serviceId: SERVICE_CORTE,
+      price: NACO_PRICE.corte,
+      durationMinutes: 30,
+      startOffsetMinutes: 60,
+      status: "confirmed",
+    },
+  ];
+
+  for (const row of rows) {
+    const startsAt = minutesFromNow(now, row.startOffsetMinutes);
+    const endsAt = minutesFromNow(now, row.startOffsetMinutes + row.durationMinutes);
+
+    await db
+      .insert(appointments)
+      .values({
+        id: row.id,
+        chainId: CHAIN_ID,
+        locationId: LOCATION_NACO,
+        clientId: row.clientId,
+        barberId: row.barberId,
+        serviceId: row.serviceId,
+        startsAt,
+        endsAt,
+        status: row.status,
+        source: "admin",
+        priceAtBooking: row.price,
+      })
+      .onConflictDoUpdate({
+        target: appointments.id,
+        set: {
+          startsAt,
+          endsAt,
+          status: row.status,
+          priceAtBooking: row.price,
+          updatedAt: new Date(),
+        },
+      });
+  }
+}
+
+/** F2-24: 3 turnos en espera en La Fila de Naco, unidos en orden FIFO. */
+async function seedQueue(now: Date) {
+  const rows: {
+    id: string;
+    joinedOffsetMinutes: number;
+    clientName: string;
+    phone: string;
+    serviceId: string;
+    preferredBarberId: string | null;
+    position: number;
+  }[] = [
+    {
+      id: WALK_IN_QUEUE_IDS[0],
+      joinedOffsetMinutes: -15,
+      clientName: "Turno Walk-in A",
+      phone: "809-555-0401",
+      serviceId: SERVICE_CORTE,
+      preferredBarberId: BARBER_IDS[0],
+      position: 1,
+    },
+    {
+      id: WALK_IN_QUEUE_IDS[1],
+      joinedOffsetMinutes: -10,
+      clientName: "Turno Walk-in B",
+      phone: "809-555-0402",
+      serviceId: SERVICE_FADE,
+      preferredBarberId: null,
+      position: 2,
+    },
+    {
+      id: WALK_IN_QUEUE_IDS[2],
+      joinedOffsetMinutes: -5,
+      clientName: "Turno Walk-in C",
+      phone: "809-555-0403",
+      serviceId: SERVICE_BARBA,
+      preferredBarberId: null,
+      position: 3,
+    },
+  ];
+
+  for (const row of rows) {
+    const joinedAt = minutesFromNow(now, row.joinedOffsetMinutes);
+
+    await db
+      .insert(walkInQueue)
+      .values({
+        id: row.id,
+        locationId: LOCATION_NACO,
+        clientId: null,
+        clientNameTemp: row.clientName,
+        phone: row.phone,
+        serviceId: row.serviceId,
+        preferredBarberId: row.preferredBarberId,
+        status: "waiting",
+        joinedAt,
+        position: row.position,
+      })
+      .onConflictDoUpdate({
+        target: walkInQueue.id,
+        set: {
+          status: "waiting",
+          joinedAt,
+          position: row.position,
+        },
+      });
+  }
+}
+
+/**
+ * F2-24: caja de hoy abierta (sin cerrar) y caja de ayer ya cerrada, con
+ * esperado/contado/diferencia para que el cierre de caja tenga con que
+ * cuadrar. El indice unico parcial de 0002 (una sola caja abierta por sede)
+ * nunca se pisa porque ambas cajas tienen id fijo: la segunda corrida hace
+ * `onConflictDoUpdate` sobre el mismo id, no un insert nuevo.
+ */
+async function seedCashSessions(now: Date) {
+  await db
+    .insert(cashSessions)
+    .values({
+      id: CASH_SESSION_TODAY_ID,
+      locationId: LOCATION_NACO,
+      openedBy: ADMIN_NACO_ID,
+      openedAt: minutesFromNow(now, -360),
+      openingAmount: "2000.00",
+      closedBy: null,
+      closedAt: null,
+    })
+    .onConflictDoUpdate({
+      target: cashSessions.id,
+      set: {
+        openedAt: minutesFromNow(now, -360),
+        openingAmount: "2000.00",
+        closedBy: null,
+        closedAt: null,
+        expectedCash: null,
+        countedCash: null,
+        difference: null,
+      },
+    });
+
+  // Ventas en efectivo de ayer (ver seedYesterdaySales): 385.00 + 500.00 +
+  // 402.50 = 1287.50. Esperado = apertura + efectivo = 3287.50. Se deja un
+  // pequeno descuadre (-7.50) para que el cierre tenga algo real que
+  // reconciliar, tal como pide el AC de F2-24.
+  const openingAmount = 2000;
+  const cashSalesTotal = 385 + 500 + 402.5;
+  const expectedCash = openingAmount + cashSalesTotal;
+  const countedCash = expectedCash - 7.5;
+  const difference = countedCash - expectedCash;
+
+  await db
+    .insert(cashSessions)
+    .values({
+      id: CASH_SESSION_YESTERDAY_ID,
+      locationId: LOCATION_NACO,
+      openedBy: ADMIN_NACO_ID,
+      openedAt: minutesFromNow(now, -24 * 60),
+      openingAmount: openingAmount.toFixed(2),
+      closedBy: ADMIN_NACO_ID,
+      closedAt: minutesFromNow(now, -16 * 60),
+      expectedCash: expectedCash.toFixed(2),
+      countedCash: countedCash.toFixed(2),
+      difference: difference.toFixed(2),
+      notes: "Descuadre menor, seed de F2-24.",
+    })
+    .onConflictDoUpdate({
+      target: cashSessions.id,
+      set: {
+        openedAt: minutesFromNow(now, -24 * 60),
+        closedAt: minutesFromNow(now, -16 * 60),
+        openingAmount: openingAmount.toFixed(2),
+        expectedCash: expectedCash.toFixed(2),
+        countedCash: countedCash.toFixed(2),
+        difference: difference.toFixed(2),
+        notes: "Descuadre menor, seed de F2-24.",
+      },
+    });
+}
+
+/**
+ * F2-24: 4-5 ventas de ayer contra la caja ya cerrada, en los 3 metodos de
+ * pago activos (D-F2-13). Ventas libres (sin `appointment_id`, walk-ins de
+ * mostrador) para no depender de una cita `completed` de ayer. Montos como
+ * strings decimales literales (regla dura §3.2 — nada de aritmetica float
+ * persistida).
+ */
+async function seedYesterdaySales(now: Date) {
+  const rows: {
+    saleId: string;
+    itemId: string;
+    barberId: string;
+    clientId: string;
+    serviceId: string;
+    unitPrice: string;
+    discountAmount: string;
+    discountReason: string | null;
+    tipAmount: string;
+    total: string;
+    paymentMethod: "cash" | "card" | "transfer";
+    createdOffsetMinutes: number;
+  }[] = [
+    {
+      saleId: SALE_YESTERDAY_IDS[0],
+      itemId: SALE_ITEM_YESTERDAY_IDS[0],
+      barberId: BARBER_IDS[0],
+      clientId: WALK_IN_CLIENT_IDS[0],
+      serviceId: SERVICE_CORTE,
+      unitPrice: NACO_PRICE.corte,
+      discountAmount: "0.00",
+      discountReason: null,
+      tipAmount: "35.00", // 10% de 350
+      total: "385.00",
+      paymentMethod: "cash",
+      createdOffsetMinutes: -20 * 60,
+    },
+    {
+      saleId: SALE_YESTERDAY_IDS[1],
+      itemId: SALE_ITEM_YESTERDAY_IDS[1],
+      barberId: BARBER_IDS[1],
+      clientId: WALK_IN_CLIENT_IDS[1],
+      serviceId: SERVICE_FADE,
+      unitPrice: NACO_PRICE.fade,
+      discountAmount: "0.00",
+      discountReason: null,
+      tipAmount: "0.00",
+      total: "500.00",
+      paymentMethod: "cash",
+      createdOffsetMinutes: -19 * 60,
+    },
+    {
+      saleId: SALE_YESTERDAY_IDS[2],
+      itemId: SALE_ITEM_YESTERDAY_IDS[2],
+      barberId: MULTI_LOCATION_BARBER_ID,
+      clientId: WALK_IN_CLIENT_IDS[0],
+      serviceId: SERVICE_BARBA,
+      unitPrice: NACO_PRICE.barba,
+      discountAmount: "0.00",
+      discountReason: null,
+      tipAmount: "37.50", // 15% de 250
+      total: "287.50",
+      paymentMethod: "card",
+      createdOffsetMinutes: -18 * 60,
+    },
+    {
+      saleId: SALE_YESTERDAY_IDS[3],
+      itemId: SALE_ITEM_YESTERDAY_IDS[3],
+      barberId: BARBER_IDS[0],
+      clientId: WALK_IN_CLIENT_IDS[1],
+      serviceId: SERVICE_FADE_BARBA,
+      unitPrice: NACO_PRICE.fadeBarba,
+      discountAmount: "50.00",
+      discountReason: "Cliente frecuente",
+      tipAmount: "0.00",
+      total: "600.00", // 650 - 50 de descuento
+      paymentMethod: "transfer",
+      createdOffsetMinutes: -17.5 * 60,
+    },
+    {
+      saleId: SALE_YESTERDAY_IDS[4],
+      itemId: SALE_ITEM_YESTERDAY_IDS[4],
+      barberId: BARBER_IDS[1],
+      clientId: WALK_IN_CLIENT_IDS[2],
+      serviceId: SERVICE_CORTE,
+      unitPrice: NACO_PRICE.corte,
+      discountAmount: "0.00",
+      discountReason: null,
+      tipAmount: "52.50", // 15% de 350
+      total: "402.50",
+      paymentMethod: "cash",
+      createdOffsetMinutes: -17 * 60,
+    },
+  ];
+
+  for (const row of rows) {
+    const createdAt = minutesFromNow(now, row.createdOffsetMinutes);
+    const subtotal = row.unitPrice;
+
+    await db
+      .insert(sales)
+      .values({
+        id: row.saleId,
+        chainId: CHAIN_ID,
+        locationId: LOCATION_NACO,
+        appointmentId: null,
+        clientId: row.clientId,
+        barberId: row.barberId,
+        cashSessionId: CASH_SESSION_YESTERDAY_ID,
+        subtotal,
+        discountAmount: row.discountAmount,
+        discountReason: row.discountReason,
+        tipAmount: row.tipAmount,
+        total: row.total,
+        paymentMethod: row.paymentMethod,
+        status: "paid",
+        createdBy: ADMIN_NACO_ID,
+        createdAt,
+      })
+      .onConflictDoUpdate({
+        target: sales.id,
+        set: {
+          subtotal,
+          discountAmount: row.discountAmount,
+          discountReason: row.discountReason,
+          tipAmount: row.tipAmount,
+          total: row.total,
+          paymentMethod: row.paymentMethod,
+          status: "paid",
+          cashSessionId: CASH_SESSION_YESTERDAY_ID,
+        },
+      });
+
+    await db
+      .insert(saleItems)
+      .values({
+        id: row.itemId,
+        saleId: row.saleId,
+        type: "service",
+        serviceId: row.serviceId,
+        productId: null,
+        quantity: 1,
+        unitPrice: row.unitPrice,
+        lineTotal: row.unitPrice,
+        barberId: row.barberId,
+      })
+      .onConflictDoUpdate({
+        target: saleItems.id,
+        set: {
+          unitPrice: row.unitPrice,
+          lineTotal: row.unitPrice,
+          barberId: row.barberId,
+        },
+      });
+  }
+}
+
 async function main() {
   console.log("Seed: creando/actualizando usuarios de Supabase Auth...");
   await ensureAuthUsers();
@@ -501,6 +1023,20 @@ async function main() {
 
   console.log("Seed: clientes...");
   await seedClients();
+
+  const now = new Date();
+
+  console.log("Seed: citas de hoy en Naco (F2-24)...");
+  await seedTodayAppointments(now);
+
+  console.log("Seed: turnos de La Fila en Naco (F2-24)...");
+  await seedQueue(now);
+
+  console.log("Seed: cajas de hoy (abierta) y de ayer (cerrada) en Naco (F2-24)...");
+  await seedCashSessions(now);
+
+  console.log("Seed: ventas de ayer en Naco (F2-24)...");
+  await seedYesterdaySales(now);
 
   console.log("\nSeed completo.");
   console.log(`Password para todos los usuarios de prueba: ${SEED_PASSWORD}`);
