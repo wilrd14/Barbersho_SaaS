@@ -12,6 +12,8 @@ import {
 } from "@/lib/scheduling/agenda"
 import { MoneyDisplay } from "@/components/kortex/money-display"
 import { AgendaBoard } from "@/components/kortex/agenda-board"
+import { AttendingNowSection } from "@/components/kortex/attending-now"
+import { QueueLiveBadge } from "@/components/kortex/queue-live-badge"
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "cn"
 
@@ -19,7 +21,8 @@ import { cn } from "cn"
  * F2-05 · "El Dia" — shell de la sede (UX-BRIEF §4.2). KPI compacto +
  * tab "Agenda" (esta pagina) / "La Fila" (navega a /queue, ya construida
  * por otro flujo de trabajo — no se duplica aqui) + acciones rapidas fijas
- * en el tercio inferior en movil.
+ * en el tercio inferior en movil. El badge en vivo de la fila (F2-18) y la
+ * seccion "Atendiendo ahora" vienen de otro flujo de trabajo en paralelo.
  */
 export default async function TodayPage({
   params,
@@ -89,13 +92,16 @@ export default async function TodayPage({
         </span>
         <Link
           href={`/sede/${locationId}/queue`}
-          className="px-3 py-2 text-body-s text-(--text-secondary) hover:text-(--text-primary)"
+          className="flex items-center gap-2 px-3 py-2 text-body-s text-(--text-secondary) hover:text-(--text-primary)"
         >
-          La Fila {kpis.queueWaitingCount > 0 ? `(${kpis.queueWaitingCount})` : ""}
+          La Fila
+          <QueueLiveBadge locationId={locationId} />
         </Link>
       </nav>
 
       <p className="text-body-s text-(--text-tertiary)">Ahora: {nowLabel}</p>
+
+      <AttendingNowSection locationId={locationId} />
 
       <AgendaBoard
         locationId={locationId}
