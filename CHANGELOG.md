@@ -1,5 +1,27 @@
 # CHANGELOG — Kortex
 
+## 2026-09-17 — F2-00: spike de Cloudflare Workers validado
+
+Antes de construir features de dinero de F2 (POS/caja), se cerró el riesgo abierto
+de Sprint 1 sobre el runtime de Cloudflare (ver pendiente #1 del sprint anterior).
+
+- Build local con `opennextjs-cloudflare` + `wrangler dev` (runtime real de
+  Workers, no Node): rutas verificadas — pública `200`, `/login` `200`, ruta
+  protegida de sede sin sesión → `403`. Drizzle + `postgres.js` sobre TCP
+  funcionan correctamente en `workerd`.
+- Deploy real a producción: **https://kortex.williamsvillavizar204.workers.dev**
+  — mismas verificaciones, mismos resultados. El spike S1-04 queda **validado**,
+  ya no es un riesgo abierto.
+- Nota técnica: en Windows, `opennextjs-cloudflare build` puede fallar con
+  `EPERM` al borrar `.open-next` si un `wrangler dev`/`preview` anterior quedó
+  con procesos `node`/`esbuild` huérfanos reteniendo el directorio. Solución:
+  cerrar esos procesos (`Stop-Process`) antes de reintentar el build.
+
+**Pendiente aparte, no bloqueante:** rotar el `service_role` key de Supabase
+que quedó expuesto en el chat de Sprint 1 — ninguna herramienta MCP disponible
+expone esa acción por API; requiere Project Settings → API → Reset
+service_role secret en el dashboard.
+
 ## 2026-09-16 — Sprint 1: fundación del proyecto (backend + design system)
 
 ### Contexto de arranque
