@@ -1,5 +1,53 @@
 # CHANGELOG — Kortex
 
+## 2026-09-17 — Cierre de sesión F2: fix de build + deploy privado
+
+Tras integrar los 4 bloques de F2 (agenda, reserva pública, fila realtime,
+caja/checkout) y el seed extendido (F2-24), se corrió por primera vez
+`npm run build` completo (los agentes de cada bloque solo habían corrido
+typecheck/lint/test para ahorrar tiempo). Encontró un bug real que ningún
+otro chequeo detecta:
+
+- **Bug de build:** `src/lib/actions/checkout.ts` (`"use server"`) exportaba
+  tres funciones sincronas puras (`centsFromDecimalString`,
+  `decimalStringFromCents`, `assertManagerRole`). Next.js exige que **toda**
+  funcion exportada de un modulo `"use server"` sea async (se trata como
+  Server Action invocable) — `next build` fallaba con "Server Actions must
+  be async functions". Se movieron las tres a
+  `src/lib/actions/money-utils.ts` (sin `"use server"`), sin cambiar su
+  logica. Lección para el equipo: correr `npm run build` completo antes de
+  dar un bloque por cerrado, no solo typecheck/lint/test.
+- Build de las 32 rutas verificado en verde tras el fix.
+
+**Estado real de F2 al cierre de esta sesión** (ver detalle por bloque más
+abajo en este changelog):
+- ✅ Bloque A (fundación: migraciones, `lib/scheduling`/`queue`/`pos`)
+- ✅ Bloque B (agenda real de sede — F2-04..09)
+- ✅ Bloque C (reserva pública funcional — F2-10..14)
+- ✅ Bloque D (La Fila con Supabase Realtime — F2-16..18)
+- ✅ Bloque E (checkout/cobro y caja — F2-20..23)
+- ✅ F2-24 (seed extendido con un día operativo en Naco, verificado contra
+  Supabase real: 8 citas, 3 turnos en fila, caja de ayer cerrada + hoy
+  abierta, 5 ventas)
+- ⏸️ **F2-25 (Playwright E2E) NO se hizo** — los 4 flujos críticos (reservar,
+  dar turno, cobrar, cerrar caja) están implementados y verificados
+  manualmente/por build, pero sin la suite E2E automatizada que pide el
+  backlog. Configurar Playwright y escribir esos 4 tests queda como primera
+  tarea pendiente de la próxima sesión.
+- ⏸️ Test de concurrencia real de doble-booking (dos inserts simultáneos
+  contra el mismo slot) no se corrió contra la DB real — el `EXCLUDE`
+  constraint está aplicado y se confía en él, pero no hay una prueba
+  automatizada que lo ejercite bajo concurrencia real.
+- ⏸️ AC de "≤3 round-trips" de F2-04 (capa de lectura de disponibilidad) no
+  se midió empíricamente.
+
+**Deploy:** redesplegado a Cloudflare con todo F2 integrado, pero con
+`workers_dev: false` (ver `wrangler.jsonc`) — el Worker existe en la cuenta
+para poder redesplegar rápido, pero sin ruta pública en `*.workers.dev`
+hasta que el dominio real esté listo. Activar temporalmente: poner
+`workers_dev: true`, `npm run deploy`, revisar, volver a `false` y
+redesplegar.
+
 ## 2026-09-17 — F2 Bloque F: seed con dia operativo (F2-24)
 
 Extiende `src/lib/db/seed.ts` (`npm run db:seed`) con un dia operativo real
