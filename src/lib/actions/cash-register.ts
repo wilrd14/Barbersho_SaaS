@@ -16,7 +16,7 @@ import { cashSessions, sales, users } from "@/lib/db/schema";
 import { requireLocationScope } from "@/lib/auth/guards";
 import { writeAuditLog } from "@/lib/auth/audit";
 import { actionError, actionOk, type ActionResult } from "@/types/action-result";
-import { assertManagerRole, centsFromDecimalString, decimalStringFromCents } from "@/lib/actions/checkout";
+import { assertManagerRole, centsFromDecimalString, decimalStringFromCents } from "@/lib/actions/money-utils";
 
 const UNIQUE_VIOLATION_CODE = "23505";
 

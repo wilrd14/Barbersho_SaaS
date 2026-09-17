@@ -52,6 +52,7 @@ import { requireLocationScope, type LocationScopeContext } from "@/lib/auth/guar
 import { writeAuditLog } from "@/lib/auth/audit";
 import { actionError, actionOk, type ActionResult } from "@/types/action-result";
 import { computeSaleTotals, type MaxDiscountPct } from "@/lib/pos";
+import { assertManagerRole, centsFromDecimalString, decimalStringFromCents } from "@/lib/actions/money-utils";
 
 type SaleTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbOrTx = typeof db | SaleTx;
@@ -60,41 +61,6 @@ const UNIQUE_VIOLATION_CODE = "23505";
 
 function isPgErrorCode(err: unknown, code: string): boolean {
   return typeof err === "object" && err !== null && "code" in err && (err as { code?: string }).code === code;
-}
-
-// ---------------------------------------------------------------------------
-// Conversion numeric(12,2) <-> centavos enteros, sin operar floats sobre
-// montos (regla dura §3.2). Solo manipulacion de strings/enteros.
-// ---------------------------------------------------------------------------
-
-export function centsFromDecimalString(value: string): number {
-  const trimmed = value.trim();
-  const negative = trimmed.startsWith("-");
-  const unsigned = negative ? trimmed.slice(1) : trimmed;
-  const [intPartRaw, fracPartRaw = ""] = unsigned.split(".");
-  const intPart = intPartRaw.replace(/\D/g, "") || "0";
-  const fracPart = (fracPartRaw.replace(/\D/g, "") + "00").slice(0, 2);
-  const cents = Number(intPart) * 100 + Number(fracPart || "0");
-  return negative ? -cents : cents;
-}
-
-export function decimalStringFromCents(cents: number): string {
-  const negative = cents < 0;
-  const abs = Math.abs(Math.trunc(cents));
-  const intPart = Math.floor(abs / 100);
-  const fracPart = abs % 100;
-  return `${negative ? "-" : ""}${intPart}.${String(fracPart).padStart(2, "0")}`;
-}
-
-// ---------------------------------------------------------------------------
-// Rol de gerente (D-F2-9/matriz §6.2): superuser/admin, nunca barbero.
-// Compartido con cash-register.ts (apertura/cierre de caja).
-// ---------------------------------------------------------------------------
-
-export function assertManagerRole(scope: LocationScopeContext) {
-  if (scope.effectiveRole !== "superuser" && scope.effectiveRole !== "admin") {
-    throw new Error("Esta accion es solo para el gerente de la sede.");
-  }
 }
 
 // ---------------------------------------------------------------------------
