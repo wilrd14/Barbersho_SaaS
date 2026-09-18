@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { SEED, uniqueRdPhone } from "./helpers";
+import { findE2eClientIds, purgeClients } from "./db-helpers";
 
 /**
  * F2-25 · Flujo critico 1/4 (PRD §15): RESERVAR.
@@ -7,7 +8,17 @@ import { SEED, uniqueRdPhone } from "./helpers";
  * Cliente anonimo completa el wizard de 4 pasos en
  * `/[chainSlug]/book` (D-F2-3) para la sede Naco del seed y confirma que la
  * cita se crea (pantalla de confirmacion con codigo de reserva, D-F2-16).
+ *
+ * Limpieza: la reserva crea un cliente (identificable por el telefono unico de
+ * esta corrida), una cita y una fila de audit_log `appointment.book_public`.
+ * `afterAll` borra todo eso via `purgeClients` (nunca filas del seed).
  */
+const PHONE = uniqueRdPhone();
+
+test.afterAll(async () => {
+  await purgeClients(await findE2eClientIds({ phone: PHONE }));
+});
+
 test("un cliente anonimo reserva una cita de principio a fin", async ({ page }) => {
   await page.goto(`/${SEED.chainSlug}/book`);
 
@@ -44,7 +55,7 @@ test("un cliente anonimo reserva una cita de principio a fin", async ({ page }) 
   // Paso 4 — confirmar.
   await expect(page.getByRole("heading", { name: "Confirma tu reserva" })).toBeVisible();
   await page.getByLabel("Nombre completo", { exact: true }).fill("Cliente E2E Reservar");
-  await page.getByLabel("Telefono", { exact: true }).fill(uniqueRdPhone());
+  await page.getByLabel("Telefono", { exact: true }).fill(PHONE);
   await page.getByRole("button", { name: "Confirmar reserva" }).click();
 
   // Confirmacion: titulo "¡Listo!" + codigo corto de reserva (D-F2-16).

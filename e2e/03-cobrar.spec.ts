@@ -1,5 +1,12 @@
 import { test, expect } from "@playwright/test";
 import { loginAs, SEED, uniqueRdPhone } from "./helpers";
+import {
+  findE2eClientIds,
+  purgeClients,
+  restoreCashState,
+  snapshotCashState,
+  type CashSnapshot,
+} from "./db-helpers";
 
 /**
  * F2-25 · Flujo critico 3/4 (PRD §15): COBRAR.
@@ -11,7 +18,24 @@ import { loginAs, SEED, uniqueRdPhone } from "./helpers";
  * Requiere que el seed tenga una caja abierta hoy en Naco (F2-24 la deja
  * abierta) — si no la hay, este test la abre el mismo (mismo camino que
  * cubre F2-20).
+ *
+ * Limpieza: el cobro crea un cliente (telefono unico), una venta con su
+ * sale_item y audit_log `sale.create`; si el test abrio una caja, tambien esa
+ * caja y su `cash.open`. `beforeAll` toma una foto de las cajas de Naco y
+ * `afterAll` deja todo como estaba (ver `restoreCashState`).
  */
+const PHONE = uniqueRdPhone();
+let cashBefore: CashSnapshot;
+
+test.beforeAll(async () => {
+  cashBefore = await snapshotCashState();
+});
+
+test.afterAll(async () => {
+  await purgeClients(await findE2eClientIds({ phone: PHONE }));
+  await restoreCashState(cashBefore);
+});
+
 test("un gerente cobra un servicio en efectivo y ve la confirmacion", async ({ page }) => {
   await loginAs(page, SEED.adminNaco);
 
@@ -32,7 +56,7 @@ test("un gerente cobra un servicio en efectivo y ve la confirmacion", async ({ p
   // Venta libre, cliente nuevo (no entra por ?appointmentId=).
   await page.getByRole("button", { name: "Cliente nuevo" }).click();
   await page.getByLabel("Nombre completo", { exact: true }).fill("Cliente E2E Cobrar");
-  await page.getByLabel("Telefono", { exact: true }).fill(uniqueRdPhone());
+  await page.getByLabel("Telefono", { exact: true }).fill(PHONE);
 
   // Linea de servicio con su default (primer servicio/barbero del catalogo).
   await page.getByRole("button", { name: /^Cobrar RD\$/ }).click();
