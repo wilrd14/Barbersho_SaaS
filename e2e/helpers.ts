@@ -29,18 +29,3 @@ export function uniqueRdPhone(): string {
   const suffix = Date.now().toString().slice(-7).padStart(7, "0");
   return `809${suffix}`;
 }
-
-/**
- * Varios formularios de F2 usan `<FormField label="X"><Input/></FormField>`
- * (`src/components/ui/field.tsx`) sin pasar `htmlFor`, asi que el `<label>`
- * queda sin asociacion programatica con su `<input>` (son hermanos en el
- * DOM, no `for`/`id`). `getByLabel()` de Playwright no los encuentra por eso
- * — es una brecha real de accesibilidad, no un problema del test, pero
- * arreglar `field.tsx` en 8 componentes distintos es un cambio de UI fuera
- * del alcance de F2-25 (tarea de testing y cierre). Este helper ubica el
- * input por el texto del `<label>` hermano, que es estable mientras no
- * cambie el copy de la pantalla.
- */
-export function fieldInput(page: Page, label: string) {
-  return page.locator(`label:text-is("${label}") + input`);
-}

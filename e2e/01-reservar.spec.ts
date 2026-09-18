@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { fieldInput, SEED, uniqueRdPhone } from "./helpers";
+import { SEED, uniqueRdPhone } from "./helpers";
 
 /**
  * F2-25 · Flujo critico 1/4 (PRD §15): RESERVAR.
@@ -43,8 +43,8 @@ test("un cliente anonimo reserva una cita de principio a fin", async ({ page }) 
 
   // Paso 4 — confirmar.
   await expect(page.getByRole("heading", { name: "Confirma tu reserva" })).toBeVisible();
-  await fieldInput(page, "Nombre completo").fill("Cliente E2E Reservar");
-  await fieldInput(page, "Telefono").fill(uniqueRdPhone());
+  await page.getByLabel("Nombre completo", { exact: true }).fill("Cliente E2E Reservar");
+  await page.getByLabel("Telefono", { exact: true }).fill(uniqueRdPhone());
   await page.getByRole("button", { name: "Confirmar reserva" }).click();
 
   // Confirmacion: titulo "¡Listo!" + codigo corto de reserva (D-F2-16).

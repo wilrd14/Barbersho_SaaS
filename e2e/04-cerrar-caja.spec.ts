@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { fieldInput, loginAs, SEED } from "./helpers";
+import { loginAs, SEED } from "./helpers";
 
 /**
  * F2-25 · Flujo critico 4/4 (PRD §15): CERRAR CAJA.
@@ -16,12 +16,12 @@ test("un gerente abre (si hace falta) y cierra la caja del dia, viendo el cuadre
 
   const openHeading = page.getByRole("heading", { name: "Abrir caja" });
   if (await openHeading.isVisible().catch(() => false)) {
-    await fieldInput(page, "Monto inicial en efectivo").fill("2000");
+    await page.getByLabel("Monto inicial en efectivo", { exact: true }).fill("2000");
     await page.getByRole("button", { name: "Abrir caja" }).click();
   }
 
   await expect(page.getByRole("heading", { name: "Cerrar caja" })).toBeVisible({ timeout: 10_000 });
-  await fieldInput(page, "Efectivo contado").fill("2000");
+  await page.getByLabel("Efectivo contado", { exact: true }).fill("2000");
   await page.getByRole("button", { name: "Cerrar caja" }).click();
 
   // Pantalla de cierre: cuadre esperado vs. contado, con el descuadre.

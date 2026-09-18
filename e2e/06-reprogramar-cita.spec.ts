@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { eq } from "drizzle-orm";
-import { fieldInput, loginAs, SEED } from "./helpers";
+import { loginAs, SEED } from "./helpers";
 import { testDb, SEED_IDS } from "./db-helpers";
 import { appointments, auditLog, barberLocations, clients, schedules, users } from "../src/lib/db/schema";
 
@@ -127,7 +127,7 @@ test.describe("Reprogramar y reasignar cita — F2-09", () => {
 
     await page.getByRole("button", { name: "Reprogramar" }).click();
 
-    await fieldInput(page, "Hora").fill("16:00");
+    await page.getByLabel("Hora", { exact: true }).fill("16:00");
 
     await page.getByLabel("Barbero").click();
     await page.getByRole("option", { name: "E2E Reprogramar Barbero B" }).click();

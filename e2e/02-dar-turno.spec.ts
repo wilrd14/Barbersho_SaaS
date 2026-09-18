@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { fieldInput, loginAs, SEED } from "./helpers";
+import { loginAs, SEED } from "./helpers";
 
 /**
  * F2-25 · Flujo critico 2/4 (PRD §15): DAR TURNO.
@@ -16,7 +16,7 @@ test("un gerente agrega un walk-in nuevo a la fila y lo ve en pantalla", async (
   await page.getByRole("button", { name: "Dar turno" }).click();
 
   const clientName = `Walkin E2E ${Date.now()}`;
-  await fieldInput(page, "Nombre del cliente").fill(clientName);
+  await page.getByLabel("Nombre del cliente", { exact: true }).fill(clientName);
 
   // Select de servicio (base-ui): abrir el combobox y elegir la primera opcion real.
   await page.getByRole("combobox", { name: "Servicio" }).click();

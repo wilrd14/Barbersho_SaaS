@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { fieldInput, loginAs, SEED, uniqueRdPhone } from "./helpers";
+import { loginAs, SEED, uniqueRdPhone } from "./helpers";
 
 /**
  * F2-25 · Flujo critico 3/4 (PRD §15): COBRAR.
@@ -21,7 +21,7 @@ test("un gerente cobra un servicio en efectivo y ve la confirmacion", async ({ p
   const goToRegister = page.getByRole("link", { name: "Ir a caja" });
   if (await goToRegister.isVisible().catch(() => false)) {
     await goToRegister.click();
-    await fieldInput(page, "Monto inicial en efectivo").fill("2000");
+    await page.getByLabel("Monto inicial en efectivo", { exact: true }).fill("2000");
     await page.getByRole("button", { name: "Abrir caja" }).click();
     await expect(page.getByRole("heading", { name: "Cerrar caja" })).toBeVisible({ timeout: 10_000 });
     await page.goto(`/sede/${SEED.naco}/checkout`);
@@ -31,8 +31,8 @@ test("un gerente cobra un servicio en efectivo y ve la confirmacion", async ({ p
 
   // Venta libre, cliente nuevo (no entra por ?appointmentId=).
   await page.getByRole("button", { name: "Cliente nuevo" }).click();
-  await fieldInput(page, "Nombre completo").fill("Cliente E2E Cobrar");
-  await fieldInput(page, "Telefono").fill(uniqueRdPhone());
+  await page.getByLabel("Nombre completo", { exact: true }).fill("Cliente E2E Cobrar");
+  await page.getByLabel("Telefono", { exact: true }).fill(uniqueRdPhone());
 
   // Linea de servicio con su default (primer servicio/barbero del catalogo).
   await page.getByRole("button", { name: /^Cobrar RD\$/ }).click();

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { FormField } from "@/components/ui/field"
 import { MoneyDisplay } from "@/components/kortex/money-display"
 import { EmptyState } from "@/components/ui/empty-state"
@@ -200,8 +201,7 @@ function CloseCashForm({
         />
       </FormField>
       <FormField label="Notas (opcional)">
-        <textarea
-          className="min-h-20 w-full rounded-md border border-(--border) bg-transparent p-2 text-body text-(--text-primary) outline-none focus-visible:border-(--accent)"
+        <Textarea
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
         />
