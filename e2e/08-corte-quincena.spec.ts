@@ -278,6 +278,42 @@ test.describe.serial("Corte de Quincena", () => {
     expect(asAdmin?.status()).toBe(403);
   });
 
+  test("el admin de Naco ve el corte de SU sede en solo lectura y no ve Bella Vista ni cambiando la URL", async ({ page }) => {
+    test.setTimeout(120_000);
+    expect(periodId).not.toBe("");
+    const nacoLines = await testDb
+      .select()
+      .from(payoutLines)
+      .where(and(eq(payoutLines.payoutPeriodId, periodId), eq(payoutLines.locationId, SEED_IDS.naco)));
+    expect(nacoLines.length).toBeGreaterThan(0);
+
+    await loginAs(page, SEED.adminNaco);
+    await page.goto(`/sede/${SEED.naco}/payouts?periodo=${periodId}`);
+    await expect(page.getByRole("heading", { name: "El Corte — Naco" })).toBeVisible();
+    const section = page.getByTestId("location-period");
+    await expect(section).toContainText(LABEL);
+    await expect(section).toContainText("Pagado");
+    // Una fila por barbero de Naco (+ encabezado), y ninguna cifra de otras sedes en TODA la pantalla.
+    await expect(section.getByRole("row")).toHaveCount(nacoLines.length + 1);
+    await expect(page.locator("body")).not.toContainText(/Bella Vista|San Crist/);
+    // Solo lectura: nada de calcular, cerrar, pagar ni ajustar.
+    for (const name of ["Calcular el corte", "Recalcular", "Cerrar el corte", "Marcar como pagado", "Guardar ajuste", "Nueva regla"]) {
+      await expect(page.getByRole("button", { name })).toHaveCount(0);
+    }
+
+    // Cambiar el locationId a otra sede: 403 (re-verificacion de 16.11 con datos de dinero).
+    const bellaVista = await page.goto(`/sede/00000000-0000-0000-0000-000000000302/payouts?periodo=${periodId}`);
+    expect(bellaVista?.status()).toBe(403);
+    const sanCristobal = await page.goto("/sede/00000000-0000-0000-0000-000000000303/payouts");
+    expect(sanCristobal?.status()).toBe(403);
+
+    // Un barbero asignado a Naco no es gerente: tambien 403.
+    await page.context().clearCookies();
+    await loginAs(page, BARBER_1);
+    const asBarber = await page.goto(`/sede/${SEED.naco}/payouts?periodo=${periodId}`);
+    expect(asBarber?.status()).toBe(403);
+  });
+
   test("un admin y un barbero reciben 403 en (chain)/commissions, incluido el corte por URL directa", async ({ page }) => {
     for (const email of [SEED.adminNaco, BARBER_1]) {
       await loginAs(page, email);

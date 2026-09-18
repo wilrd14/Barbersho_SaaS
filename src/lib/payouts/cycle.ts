@@ -99,11 +99,20 @@ export async function lockPeriod(tx: PayoutTx, chainId: string, periodId: string
   return row ?? null;
 }
 
-export async function loadStoredLines(executor: PayoutSelectExecutor, periodId: string): Promise<StoredLine[]> {
+/** Lineas guardadas del periodo; con `locationId`, solo las de esa sede (la vista del admin no carga cifras de otras). */
+export async function loadStoredLines(
+  executor: PayoutSelectExecutor,
+  periodId: string,
+  locationId?: string,
+): Promise<StoredLine[]> {
   const rows = await executor
     .select()
     .from(payoutLines)
-    .where(eq(payoutLines.payoutPeriodId, periodId))
+    .where(
+      locationId
+        ? and(eq(payoutLines.payoutPeriodId, periodId), eq(payoutLines.locationId, locationId))
+        : eq(payoutLines.payoutPeriodId, periodId),
+    )
     .orderBy(asc(payoutLines.locationId), asc(payoutLines.barberId));
   return rows.map((r) => ({
     id: r.id,
