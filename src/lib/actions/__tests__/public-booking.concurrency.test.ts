@@ -65,12 +65,22 @@ describe("Doble-booking — concurrencia real contra Postgres", () => {
     if (!location) throw new Error("No se encontro la sede Naco del seed.");
     chainId = location.chainId;
 
+    // Un barbero REAL de Naco: con horario sembrado (`schedules`), no un admin.
+    // Antes era `barber_locations ... limit(1)` sin orden, que devolvia la fila
+    // fisica que Postgres tuviera primero: al re-escribir `barber_locations`
+    // (seed de F3-01: commission_rule_id) salio el Admin Naco, sin horario, y el
+    // segundo test fallaba. `barber_locations` tambien lista admins.
     const [barber] = await db
-      .select({ userId: barberLocations.userId })
-      .from(barberLocations)
-      .where(and(eq(barberLocations.locationId, NACO), eq(barberLocations.isActive, true)))
+      .selectDistinct({ userId: schedules.userId })
+      .from(schedules)
+      .innerJoin(
+        barberLocations,
+        and(eq(barberLocations.userId, schedules.userId), eq(barberLocations.locationId, schedules.locationId)),
+      )
+      .where(and(eq(schedules.locationId, NACO), eq(schedules.isActive, true), eq(barberLocations.isActive, true)))
+      .orderBy(schedules.userId)
       .limit(1);
-    if (!barber) throw new Error("No hay barberos activos en Naco — revisa el seed.");
+    if (!barber) throw new Error("No hay barberos activos con horario en Naco — revisa el seed.");
     barberId = barber.userId;
 
     const [service] = await db.select({ id: services.id }).from(services).limit(1);
