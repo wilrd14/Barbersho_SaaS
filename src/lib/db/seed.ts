@@ -1,7 +1,7 @@
 import { config } from "dotenv";
 config({ path: ".env.local" });
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "./client";
 import {
@@ -23,6 +23,7 @@ import {
   walkInQueue,
 } from "./schema";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { HISTORY_SALE_ID_LIKE, generateSeedHistory } from "./seed-history";
 
 /**
  * Seed de datos de prueba (S1-15). Idempotente: usa UUIDs fijos y
@@ -66,6 +67,9 @@ const SERVICE_FADE_BARBA = "00000000-0000-0000-0000-000000000404";
 const SERVICE_TINTE = "00000000-0000-0000-0000-000000000405";
 
 const COMMISSION_RULE_ID = "00000000-0000-0000-0000-000000000501";
+// F3-01: reglas de pago por barbero-sede (D-F3-3: el override vive en barber_locations).
+const COMMISSION_RULE_BOOTH_ID = "00000000-0000-0000-0000-000000000502";
+const COMMISSION_RULE_HYBRID_ID = "00000000-0000-0000-0000-000000000503";
 
 const WALK_IN_CLIENT_IDS = [
   "00000000-0000-0000-0000-000000000701",
@@ -490,6 +494,7 @@ async function seedServiceOverrides() {
 }
 
 async function seedCommissionRule() {
+  // Regla default de la cadena (applies_to = 'chain', unica por 0004).
   await db
     .insert(commissionRules)
     .values({
@@ -504,6 +509,87 @@ async function seedCommissionRule() {
       target: commissionRules.id,
       set: { serviceCommissionPct: "50", appliesTo: "chain" },
     });
+
+  // F3-01: silla fija semanal. El barbero se queda con el 100% de lo que produce
+  // y paga RD$3,000 por cada lunes de la quincena (D-F3-8).
+  await db
+    .insert(commissionRules)
+    .values({
+      id: COMMISSION_RULE_BOOTH_ID,
+      chainId: CHAIN_ID,
+      name: "Silla fija RD$3,000/semana",
+      type: "booth_rent",
+      boothRentAmount: "3000.00",
+      boothRentFrequency: "weekly",
+      tipHandling: "barber_keeps_all",
+      appliesTo: "barber",
+    })
+    .onConflictDoUpdate({
+      target: commissionRules.id,
+      set: {
+        name: "Silla fija RD$3,000/semana",
+        type: "booth_rent",
+        serviceCommissionPct: null,
+        boothRentAmount: "3000.00",
+        boothRentFrequency: "weekly",
+        tipHandling: "barber_keeps_all",
+        appliesTo: "barber",
+      },
+    });
+
+  // F3-01: mixta = 30% de comision + silla mensual RD$4,000 (mitad y mitad por quincena).
+  await db
+    .insert(commissionRules)
+    .values({
+      id: COMMISSION_RULE_HYBRID_ID,
+      chainId: CHAIN_ID,
+      name: "Mixta 30% + silla RD$4,000/mes",
+      type: "hybrid",
+      serviceCommissionPct: "30",
+      boothRentAmount: "4000.00",
+      boothRentFrequency: "monthly",
+      tipHandling: "barber_keeps_all",
+      appliesTo: "barber",
+    })
+    .onConflictDoUpdate({
+      target: commissionRules.id,
+      set: {
+        name: "Mixta 30% + silla RD$4,000/mes",
+        type: "hybrid",
+        serviceCommissionPct: "30",
+        boothRentAmount: "4000.00",
+        boothRentFrequency: "monthly",
+        tipHandling: "barber_keeps_all",
+        appliesTo: "barber",
+      },
+    });
+}
+
+/**
+ * F3-01: asigna el override de regla por (barbero, sede) sobre
+ * barber_locations.commission_rule_id (unico mecanismo de "comision distinta
+ * por sede", PRD §5.2 / D-F3-3). `null` = usa la regla default de la cadena.
+ * El barbero multi-sede (b3) tiene una regla DISTINTA en cada una de sus dos
+ * sedes: mixta en Naco y silla fija en Bella Vista. Es un UPDATE por fila
+ * exacta, idempotente por naturaleza.
+ */
+async function seedCommissionAssignments() {
+  const assignments: { userId: string; locationId: string; ruleId: string | null }[] = [
+    { userId: BARBER_IDS[0], locationId: LOCATION_NACO, ruleId: null },
+    { userId: BARBER_IDS[1], locationId: LOCATION_NACO, ruleId: null },
+    { userId: MULTI_LOCATION_BARBER_ID, locationId: LOCATION_NACO, ruleId: COMMISSION_RULE_HYBRID_ID },
+    { userId: MULTI_LOCATION_BARBER_ID, locationId: LOCATION_BELLA_VISTA, ruleId: COMMISSION_RULE_BOOTH_ID },
+    { userId: BARBER_IDS[3], locationId: LOCATION_BELLA_VISTA, ruleId: COMMISSION_RULE_HYBRID_ID },
+    { userId: BARBER_IDS[4], locationId: LOCATION_BELLA_VISTA, ruleId: null },
+    { userId: BARBER_IDS[5], locationId: LOCATION_SAN_CRISTOBAL, ruleId: COMMISSION_RULE_BOOTH_ID },
+  ];
+
+  for (const a of assignments) {
+    await db
+      .update(barberLocations)
+      .set({ commissionRuleId: a.ruleId })
+      .where(and(eq(barberLocations.userId, a.userId), eq(barberLocations.locationId, a.locationId)));
+  }
 }
 
 async function seedClients() {
@@ -996,6 +1082,96 @@ async function seedYesterdaySales(now: Date) {
   }
 }
 
+/**
+ * F3-01: ~35 dias de ventas reales en las 3 sedes (ver `seed-history.ts`), mas
+ * 24 clientes de historia. Se re-siembra con borrar-e-insertar de TODA la
+ * historia de ventas (IDs con prefijo propio) en una sola transaccion: como las
+ * horas estan ancladas a `now` y dejan de coincidir con el dia de la siembra
+ * anterior, un upsert fila a fila dejaria ventas huerfanas (p. ej. un dia que
+ * ahora cae en domingo). Borrar por patron de ID no toca ninguna venta real ni
+ * las 5 ventas de ayer de F2-24. `sale_items` cae por cascade. Dentro de la
+ * transaccion TODO usa `tx` (pool max:1 => usar `db` seria un deadlock
+ * silencioso). Insercion por lotes para no pasar del limite de parametros.
+ */
+async function seedSalesHistory(now: Date) {
+  const history = generateSeedHistory(now);
+  const BATCH = 150;
+
+  await db.transaction(async (tx) => {
+    // Clientes: upsert por id (las ventas los referencian con RESTRICT, no se borran).
+    await tx
+      .insert(clients)
+      .values(
+        history.clients.map((c) => ({
+          id: c.id,
+          chainId: CHAIN_ID,
+          fullName: c.fullName,
+          phone: c.phone,
+          createdAt: c.createdAt,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: clients.id,
+        set: {
+          fullName: sql`excluded.full_name`,
+          phone: sql`excluded.phone`,
+          createdAt: sql`excluded.created_at`,
+        },
+      });
+
+    await tx.delete(sales).where(sql`${sales.id}::text like ${HISTORY_SALE_ID_LIKE}`);
+
+    for (let i = 0; i < history.sales.length; i += BATCH) {
+      await tx
+        .insert(sales)
+        .values(
+          history.sales.slice(i, i + BATCH).map((s) => ({
+            id: s.id,
+            chainId: CHAIN_ID,
+            locationId: s.locationId,
+            appointmentId: null,
+            clientId: s.clientId,
+            barberId: s.barberId,
+            cashSessionId: null,
+            subtotal: s.subtotal,
+            discountAmount: s.discountAmount,
+            discountReason: s.discountReason,
+            tipAmount: s.tipAmount,
+            total: s.total,
+            paymentMethod: s.paymentMethod,
+            status: s.status,
+            createdBy: s.createdBy,
+            createdAt: s.createdAt,
+          })),
+        )
+        .onConflictDoNothing({ target: sales.id });
+    }
+
+    for (let i = 0; i < history.items.length; i += BATCH) {
+      await tx
+        .insert(saleItems)
+        .values(
+          history.items.slice(i, i + BATCH).map((it) => ({
+            id: it.id,
+            saleId: it.saleId,
+            type: "service" as const,
+            serviceId: it.serviceId,
+            productId: null,
+            quantity: 1,
+            unitPrice: it.unitPrice,
+            lineTotal: it.lineTotal,
+            barberId: it.barberId,
+          })),
+        )
+        .onConflictDoNothing({ target: saleItems.id });
+    }
+  });
+
+  console.log(
+    `  ${history.sales.length} ventas, ${history.items.length} lineas, ${history.clients.length} clientes de historia.`,
+  );
+}
+
 async function main() {
   console.log("Seed: creando/actualizando usuarios de Supabase Auth...");
   await ensureAuthUsers();
@@ -1024,8 +1200,11 @@ async function main() {
   console.log("Seed: overrides de precio por sede...");
   await seedServiceOverrides();
 
-  console.log("Seed: regla de comision...");
+  console.log("Seed: reglas de comision (default + silla fija + mixta)...");
   await seedCommissionRule();
+
+  console.log("Seed: override de regla por barbero-sede (F3-01)...");
+  await seedCommissionAssignments();
 
   console.log("Seed: clientes...");
   await seedClients();
@@ -1043,6 +1222,9 @@ async function main() {
 
   console.log("Seed: ventas de ayer en Naco (F2-24)...");
   await seedYesterdaySales(now);
+
+  console.log("Seed: historia de ventas de ~35 dias en las 3 sedes (F3-01)...");
+  await seedSalesHistory(now);
 
   console.log("\nSeed completo.");
   console.log(`Password para todos los usuarios de prueba: ${SEED_PASSWORD}`);
