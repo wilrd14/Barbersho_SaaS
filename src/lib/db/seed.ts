@@ -1,7 +1,7 @@
 import { config } from "dotenv";
 config({ path: ".env.local" });
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import { db } from "./client";
 import {
@@ -663,36 +663,42 @@ async function seedTodayAppointments(now: Date) {
     },
   ];
 
-  for (const row of rows) {
-    const startsAt = minutesFromNow(now, row.startOffsetMinutes);
-    const endsAt = minutesFromNow(now, row.startOffsetMinutes + row.durationMinutes);
+  // Borrar-e-insertar (en una sola transaccion), NO `onConflictDoUpdate`
+  // fila por fila. `appointments_no_overlap_per_barber` (EXCLUDE, ver
+  // 0002_f2_integrity.sql) no es DEFERRABLE: al re-sembrar en otro momento del
+  // dia (las horas estan ancladas a `now`), actualizar una fila a su nueva
+  // hora puede solaparse transitoriamente con una hermana del mismo barbero
+  // que todavia conserva su hora vieja, y Postgres rechaza el UPDATE. Con
+  // DELETE de las 8 filas primero, ninguna hermana vieja queda para chocar.
+  // Solo se borran los IDs fijos del seed (APPOINTMENT_TODAY_IDS): no se toca
+  // ninguna cita real. `sales.appointment_id` es `on delete set null`, asi
+  // que ninguna venta se pierde. Dentro de la transaccion TODO usa `tx`
+  // (pool max:1 => usar `db` aqui seria un deadlock silencioso).
+  await db.transaction(async (tx) => {
+    await tx.delete(appointments).where(inArray(appointments.id, APPOINTMENT_TODAY_IDS));
 
-    await db
-      .insert(appointments)
-      .values({
-        id: row.id,
-        chainId: CHAIN_ID,
-        locationId: LOCATION_NACO,
-        clientId: row.clientId,
-        barberId: row.barberId,
-        serviceId: row.serviceId,
-        startsAt,
-        endsAt,
-        status: row.status,
-        source: "admin",
-        priceAtBooking: row.price,
-      })
-      .onConflictDoUpdate({
-        target: appointments.id,
-        set: {
+    for (const row of rows) {
+      const startsAt = minutesFromNow(now, row.startOffsetMinutes);
+      const endsAt = minutesFromNow(now, row.startOffsetMinutes + row.durationMinutes);
+
+      await tx
+        .insert(appointments)
+        .values({
+          id: row.id,
+          chainId: CHAIN_ID,
+          locationId: LOCATION_NACO,
+          clientId: row.clientId,
+          barberId: row.barberId,
+          serviceId: row.serviceId,
           startsAt,
           endsAt,
           status: row.status,
+          source: "admin",
           priceAtBooking: row.price,
-          updatedAt: new Date(),
-        },
-      });
-  }
+        })
+        .onConflictDoNothing({ target: appointments.id });
+    }
+  });
 }
 
 /** F2-24: 3 turnos en espera en La Fila de Naco, unidos en orden FIFO. */

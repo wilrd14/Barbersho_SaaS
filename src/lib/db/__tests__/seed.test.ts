@@ -37,4 +37,13 @@ describe("seed — idempotencia (S1-15)", () => {
       expect(isProtected, `Bloque sin proteccion de idempotencia:\n${block}`).toBe(true);
     }
   });
+
+  it("las citas de hoy se re-siembran con delete+insert en una transaccion (EXCLUDE no diferido)", async () => {
+    const seedSource = await readFile(new URL("../seed.ts", import.meta.url), "utf8");
+    const fn = seedSource.slice(seedSource.indexOf("async function seedTodayAppointments"));
+    const body = fn.slice(0, fn.indexOf("async function seedQueue"));
+    expect(body).toContain("db.transaction");
+    expect(body).toContain("tx.delete(appointments)");
+    expect(body).not.toContain(".onConflictDoUpdate(");
+  });
 });
