@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import { db } from "@/lib/db/client";
 import * as schema from "@/lib/db/schema";
-import { appointments, barberLocations, clients, locations, schedules, services } from "@/lib/db/schema";
+import { appointments, auditLog, barberLocations, clients, locations, schedules, services } from "@/lib/db/schema";
 import { createPublicBookingAction } from "@/lib/actions/public-booking";
 
 /**
@@ -86,9 +86,20 @@ describe("Doble-booking — concurrencia real contra Postgres", () => {
     // empezar. Identificados por la marca `price_at_booking = 500.00` +
     // `source = admin` que solo usa este test, o por los telefonos fijos de
     // prueba de este archivo.
+    // OJO: las citas del seed de F2-24 (IDs `00000000-0000-0000-0000-…`) tambien
+    // son `source = admin` y una de ellas (`…0801`, Fade a RD$500 del barbero
+    // 1) cumplia esta marca: `npm run test` borraba una fila del seed. Por eso
+    // se excluyen explicitamente los IDs fijos del seed.
     await db
       .delete(appointments)
-      .where(and(eq(appointments.barberId, barberId), eq(appointments.priceAtBooking, "500.00"), eq(appointments.source, "admin")));
+      .where(
+        and(
+          eq(appointments.barberId, barberId),
+          eq(appointments.priceAtBooking, "500.00"),
+          eq(appointments.source, "admin"),
+          sql`${appointments.id}::text not like '00000000-0000-0000-0000-%'`,
+        ),
+      );
     const testPhones = ["+18095557001", "+18095557002", "+18095557003", "+18095557004"];
     const staleClients = await db.select({ id: clients.id }).from(clients).where(inArray(clients.phone, testPhones));
     if (staleClients.length > 0) {
@@ -205,6 +216,9 @@ describe("Doble-booking — concurrencia real contra Postgres", () => {
     // Limpieza: primero las citas (FK a clients), despues los clientes de
     // prueba creados por esta llamada.
     if (createdAppointmentIds.length > 0) {
+      // `createPublicBookingAction` escribe audit_log `appointment.book_public`:
+      // sin borrarlo aqui quedaba una fila huerfana por corrida.
+      await db.delete(auditLog).where(inArray(auditLog.entityId, createdAppointmentIds));
       await db.delete(appointments).where(inArray(appointments.id, createdAppointmentIds));
       createdAppointmentIds.length = 0;
     }
