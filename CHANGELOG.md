@@ -1,5 +1,398 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — F3 Bloque A: migracion 0004, seed de una quincena real, motor de comisiones puro y capa de lectura
+
+Cuatro tareas del `BACKLOG-F3.md` (F3-00, F3-01, F3-02, F3-03), un commit por
+tarea sobre `main`: `4a88444` (F3-00), `b8c5fb1` (F3-01), `682cba1` (F3-02),
+`fbebf18` (F3-03), mas el arreglo de un test fragil y este CHANGELOG. **No se
+implemento nada de los bloques B-E** (Server Actions del ciclo, pantallas,
+dashboard, billing): esos agentes construyen sobre las firmas de la seccion
+"Contrato para los bloques siguientes".
+
+**Estado final verificado, en este orden:** `npm run typecheck` (0 errores),
+`npm run lint` (0 errores; 1 warning ajeno en `coverage/block-navigation.js`,
+archivo generado), `npm run test` (16 archivos, **225 tests**, verde; eran 131),
+`npm run test:coverage` (nuevo; `lib/commissions/index.ts` **100% statements
+219/219, branches 144/144, funciones 45/45, lineas 188/188**), `npm run build`
+completo (25 rutas, Turbopack) y `npx playwright test` completo: **7 de 7 en
+verde**, con la BD **identica a la nueva linea base** (conteos y md5 por tabla)
+tras Vitest y tras Playwright. Sin `npm run deploy`, sin tocar `wrangler.jsonc`,
+`.env.local` ni `.dev.vars`; ningun secreto impreso ni commiteado.
+
+### F3-00 — Migracion `0004_f3_money_integrity.sql` (commit `4a88444`)
+
+- **Que hace** (exactamente §5 del backlog, cero columnas, cero renombres, cero
+  policies): `EXCLUDE` `payout_periods_no_overlap_per_chain` (`chain_id with =`,
+  `daterange(starts_on, ends_on, '[]') with &&`, gist/`btree_gist`); unico
+  `payout_lines_period_barber_location_uq`; unico parcial
+  `commission_rules_chain_default_uq (chain_id) where applies_to='chain'`;
+  indices `sale_items_barber_id_idx`, `sales_location_status_created_idx
+  (location_id, status, created_at)`, `payout_lines_barber_id_idx`,
+  `payout_lines_payout_period_id_idx`. Cada sentencia es re-ejecutable por si
+  sola (`if not exists` / bloque `DO $$` que consulta `pg_constraint`), ademas
+  del tracking de drizzle. Journal: entrada `idx 4`, `when 1789598801140`.
+- **Aplicada al Supabase real** con `npm run db:migrate` (2 veces seguidas: la
+  2a no hace nada). `drizzle.__drizzle_migrations` = 4 filas.
+- **Verificado con Postgres real** (no solo leyendo el SQL), cada caso en una
+  transaccion con rollback:
+  - dos periodos solapados de la misma cadena (`2099-01-01..15` y `..15..31`)
+    -> `23P01 payout_periods_no_overlap_per_chain`;
+  - dos `payout_lines` del mismo (periodo, barbero, sede) -> `23505
+    payout_lines_period_barber_location_uq`;
+  - segunda regla `applies_to='chain'` -> `23505 commission_rules_chain_default_uq`;
+  - quincenas adyacentes (`03-01..15` y `03-16..31`) y una regla
+    `applies_to='barber'` SI se aceptan;
+  - los 6 indices existen; `pg_policies` muestra las 5 policies
+    `*_tenant_isolation` (commission_rules, payout_periods, payout_lines,
+    location_daily_metrics, subscriptions): **RLS confirmada, no se escribio
+    ninguna policy**. La migracion lo deja escrito en su cabecera.
+- **Test de regresion permanente:** `src/lib/db/__tests__/f3-integrity.test.ts`
+  (5 tests contra la DB real, todos con rollback, fechas de 2099).
+- **Nota:** el `EXCLUDE` no exige `starts_on <= ends_on`, pero `daterange`
+  lanza si el inicio es mayor que el fin, asi que un periodo invertido ya no
+  entra. No se agrego un `CHECK` (no esta autorizado en §5).
+
+### F3-01 — Seed de una quincena real (commit `b8c5fb1`)
+
+- **Que se sembro** (`src/lib/db/seed.ts` + generador puro y determinista
+  `src/lib/db/seed-history.ts`, PRNG con semilla fija, todo anclado a `now` y a
+  la zona de la cadena UTC-4 sin `Date` dependiente de la tz del proceso):
+  - **609 ventas / 748 lineas / 24 clientes de historia** en las 3 sedes, de
+    los ultimos 34 dias (sin domingos: la barberia cierra) mas 2 ventas de hoy
+    por sede (6 en total; asi la quincena en curso tiene con que calcular
+    incluso el dia 1 o 16). Antes: 5 ventas.
+  - Mezcla de efectivo/tarjeta/transferencia (50/30/20), propinas en ~55% de
+    las ventas, **53 ventas con descuento y motivo, 0 sin motivo**, **88 tickets
+    de 2 barberos** (~18%), **1 venta `refunded`** (BV, con propina, para que el
+    motor la excluya).
+  - Barberos con ventas: 6 (b1..b6). **b3 (multi-sede) vende en Naco lun-mie y en
+    Bella Vista jue-sab** (sus horarios sembrados), asi que en cualquier
+    quincena tiene ventas en sus dos sedes: 59 ventas/RD$24,200 bruto en Naco y
+    30/RD$11,900 en Bella Vista en los 34 dias.
+  - **Ventas de guion** para los casos del motor: 3 lineas de RD$350 (b1, b2, b1)
+    con descuento RD$100.00 (residuo de 1 centavo, D-F3-5); fade b1 RD$500 + barba
+    b2 RD$250 con descuento RD$100.01 (2 barberos, descuento impar); la venta
+    `refunded`.
+  - **3 reglas de pago** (ids `...501` default 50% que ya existia, `...502`
+    "Silla fija RD$3,000/semana" `booth_rent` weekly, `...503` "Mixta 30% + silla
+    RD$4,000/mes" `hybrid` monthly; las nuevas con `applies_to='barber'`,
+    `tip_handling='barber_keeps_all'`). Overrides por
+    `barber_locations.commission_rule_id`: **b3 Naco = mixta y b3 Bella Vista =
+    silla fija (regla distinta en cada una de sus dos sedes)**, b4 BV = mixta,
+    b6 SC = silla fija; b1, b2, b5 usan el default.
+  - Ingreso (subtotal - descuento) por sede en la ventana entera: Naco
+    RD$147,479.99 (293 ventas), Bella Vista RD$90,067.50 (177), San Cristobal
+    RD$64,272.50 (143).
+- **Idempotencia y deuda del CHANGELOG del 18 sep** (choque con el `EXCLUDE` de
+  citas al re-sembrar otro dia): esa parte ya la habia resuelto la tanda
+  anterior (borrar+insertar en una transaccion); esta tarea aplica el mismo
+  patron a la historia: **borrar todas las ventas con prefijo de ID propio
+  (`00000000-0000-0000-0000-2…`, `sale_items` cae por cascade) e insertarlas en
+  una sola `db.transaction` con `tx` en todo**, por lotes de 150 filas (limite
+  de parametros de Postgres). Un upsert fila a fila dejaria ventas huerfanas al
+  cambiar el dia (p. ej. un dia que ahora cae en domingo). Sin migracion.
+- **Verificado contra el Supabase real:** `db:seed` sobre base limpia y **2
+  corridas seguidas -> conteos y md5 por tabla identicos** (`scripts/db-baseline.ts`);
+  y **sobre una base "sembrada otro dia"** (desplazadas -3 dias las 609 ventas y
+  los 24 clientes y -5 h las citas de hoy) -> el seed corre sin error y deja
+  la BD identica a la linea base. Los E2E (7/7) no la alteran.
+- **Nueva linea base completa** (dia de la medicion: viernes 2026-09-18;
+  `npx tsx scripts/db-baseline.ts` imprime count + md5 por tabla):
+
+  | tabla | antes | ahora |
+  |---|---|---|
+  | appointments | 8 | 8 |
+  | walk_in_queue | 3 | 3 |
+  | cash_sessions | 2 | 2 |
+  | **sales** | 5 | **614** |
+  | **sale_items** | 5 | **753** |
+  | **clients** | 5 | **29** |
+  | audit_log | 0 | 0 |
+  | time_off | 0 | 0 |
+  | **commission_rules** | 1 | **3** |
+  | barber_locations | 9 | 9 (7 con override o explicitamente `null`) |
+  | payout_periods / payout_lines | 0 | 0 |
+  | location_daily_metrics | 0 | 0 |
+  | notifications / stock_movements | 0 | 0 |
+  | subscriptions | 1 | 1 |
+
+  **Aviso:** `sales`/`sale_items` de la linea base dependen del dia de la
+  semana en que se siembra (los domingos no tienen ventas y una ventana de 34
+  dias contiene 4 o 5): 614/753 es para un viernes. Lo que se compara entre
+  corridas del mismo dia es igual; entre dias distintos re-sembrar primero.
+- **Decisiones sin respaldo explicito** (ver lista final): ventas historicas con
+  `cash_session_id = null`; los 24 clientes de historia; `applies_to='barber'`.
+- **E2E:** `e2e/db-helpers.ts` **no necesito cambios**: sus limpiezas ya excluyen
+  `00000000-0000-0000-0000-…` (`notSeedId`) y los IDs nuevos usan ese prefijo
+  (`…-2…` ventas, `…-3…` lineas, `…-4…` clientes). Comprobado: Playwright 7/7 y
+  BD identica a la linea base tras la corrida completa (2 veces).
+
+### F3-02 — `src/lib/commissions/index.ts`, motor puro (commit `682cba1`)
+
+- **Modulo puro** (regla §3.11): unico import `roundHalfToEven` de `@/lib/pos`
+  (D-F3-20; `lib/pos` no se toco). Sin `db`, `next/*`, `Date`, `Intl`,
+  `Math.random`, `parseFloat`, `toFixed` ni literales decimales: **un test lo
+  verifica leyendo el codigo fuente sin comentarios ni strings**. Las fechas son
+  strings `YYYY-MM-DD` y se manipulan con calendario civil en enteros
+  (`daysFromCivil`, algoritmo de H. Hinnant).
+- **Decisiones D-F3 aplicadas:** D-F3-1 (solo `paid`, atribucion por linea),
+  D-F3-3 (override de `barber_locations` -> regla `applies_to='chain'` -> error
+  que nombra barbero y sede; nunca 0%/50% implicito), D-F3-4 (`fixed_per_service`
+  rechazado con mensaje), D-F3-5 (prorrateo + residuo), D-F3-6 (formula del neto
+  y neto negativo sin truncar), D-F3-7 (propina integra al `sales.barber_id`;
+  `split_pct` rechazado), D-F3-8 (alquiler), D-F3-11 (invariante exportado),
+  D-F3-20 (bps enteros, redondeo bancario).
+- **Casos con montos concretos (todos en los 70 tests del motor):**
+  - Prorrateo: 3 lineas de 35000 con descuento 10000 -> descuentos 3333+3333+3333
+    = 9999, residuo +1 a la PRIMERA linea -> bases `[31666, 31667, 31667]` (suma
+    95000 = 105000-10000). `[25000,25000,50000]` con descuento 1 -> el centavo va
+    a la de 50000: `[25000,25000,49999]`. Residuo NEGATIVO: `[500,250,250]` con
+    999 -> `[1,0,0]`. Empate `[100,100]` con 1 -> `[99,100]`. Ticket de 2
+    barberos `[50000,25000]` con 10001 -> `[43333,21666]` (= 75000-10001).
+    Propiedad con 3000 tickets aleatorios: suma de bases = subtotal-descuento,
+    ninguna base negativa, todo entero.
+  - Una sede, regla de cadena 50%: ventas de 35000 (+ propina 3500) y de 50000
+    con descuento 5000 -> `services_revenue 80000`, `commission 40000`,
+    `tips 3500`, `net 43500`, `services_count 2`.
+  - **Multi-sede (2 lineas, montos distintos que suman su total):** Luis en Naco
+    (mixta 30% + RD$4,000/mes) produce RD$10,000 -> comision 300000, renta
+    200000 (mitad), propinas 2000, **neto 102000**; en Bella Vista (silla fija
+    RD$3,000/lunes, 2 lunes) produce RD$9,000 -> comision 900000, renta 600000,
+    propinas 3000, **neto 303000**; total 405000.
+  - Silla fija con **neto negativo**: produce 100000, renta 3000x2 -> `net -500000`.
+  - `weekly`: sep 1-15 de 2026 = 2 lunes (7, 14), sep 16-30 = 2 (21, 28), jun 1-15
+    de 2026 = **3 lunes** (1, 8, 15). Cruce con un oraculo escrito con `Date`
+    en el test: **todas las quincenas de 2024-2032** coinciden y las 24 de 2026
+    suman **exactamente 52**.
+  - `monthly` con monto impar 300001: 1a quincena 150000, 2a **150001** (suman el
+    total). Febrero 16-28 (no bisiesto) y 16-29 (bisiesto) se reconocen como
+    2a quincena; 16-28 en bisiesto NO.
+  - Redondeo bancario: 57.50% de 101 centavos = 58.075 -> 58; de 33 = 18.975 ->
+    19; 50% de 1 = 0.5 -> 0; 50% de 3 = 1.5 -> 2. En el ticket de 2 barberos, 50%
+    de 43333 = 21666.5 -> **21666** (par).
+  - Errores exactos: `"Jandy R. no tiene regla de pago en Bella Vista."`;
+    `fixed_per_service` -> `La regla "Fijo por corte" (monto fijo por servicio) aun
+    no esta soportada; aplica a Jandy R. en Naco. ...`; se **acumulan todos los
+    problemas** de una pasada (`problems[]` con `code`, `barberId`, `locationId`).
+  - Venta `refunded`/`open`/fuera de rango excluidas; periodo sin ventas ->
+    `{ ok: true, lines: [] }`.
+  - **Invariante:** un centavo de mas en ingreso o de menos en propinas de una
+    sede -> `ok:false` con `mismatches` y el mensaje `Naco: ingreso esperado
+    99999 vs calculado 100000 centavos, ...`; propiedad con 300 periodos
+    aleatorios (reglas mixtas, descuentos, refunded, fechas dentro y fuera):
+    `computePayoutLines` siempre cuadra con `verifyPayoutInvariant`.
+- **Generalizacion del invariante (decision propia):** el descuento se prorratea
+  entre TODAS las lineas de la venta (servicio y producto) y el invariante compara
+  `services_revenue + product_revenue` contra `subtotal - descuento`. Con
+  `product_revenue = 0` (todo F3) es exactamente el texto de D-F3-11.
+- **Config de cobertura:** `vitest.config.ts` (`coverage.include =
+  src/lib/commissions/index.ts`, umbrales 100/100/100/100) y el script
+  `npm run test:coverage`. `coverage/` ya estaba en `.gitignore`.
+
+### F3-03 — `loadPayoutInputs` (commit `fbebf18`)
+
+- **Archivo:** `src/lib/commissions/load-payout-inputs.ts` (con `import
+  "server-only"`, NO es un archivo `"use server"`: no expone endpoint; quien lo
+  llame es responsable del guard). Devuelve `PayoutInputs` (el tipo del motor).
+- **Ejecutor explicito y sin valor por defecto** (`Pick<typeof db, "select">`;
+  `db` solo entra como `import type`). Una guarda estatica en su test prohibe
+  `Promise.all`, cualquier `Date` y el import de `db` como valor.
+- **Fecha operativa en la tz de la SEDE:** `(sales.created_at AT TIME ZONE
+  locations.timezone)::date BETWEEN $inicio::date AND $fin::date`, todo por
+  strings `YYYY-MM-DD` (nunca `Date`, regla §3.3). Ademas una cota gruesa en UTC
+  (+-2/+3 dias) para poder usar el indice de `sales`; el filtro exacto es el de
+  la fecha local.
+- **Pruebas contra el Supabase real (10 tests):**
+  - 23:45 del ultimo dia del periodo **entra** (`2099-01-31 23:45:00-04`, que es
+    03:45 UTC del 1-feb) y 00:15 del dia siguiente **no**; 23:59 del ultimo dia
+    de la quincena anterior no; 00:00:30 del primer dia si.
+  - **Zona de la sede y no la del servidor/cadena:** con Bella Vista cambiada a
+    `Pacific/Auckland` (en el test, con rollback) la misma hora UTC cae en el dia
+    16 en Auckland y en el 15 en Naco.
+  - Sobre el seed (quincena 1-15 sep 2026): **274 ventas** cargadas = conteo y
+    suma `subtotal-descuento` de un SQL independiente **al centavo**; 3 sedes, 3
+    reglas, b3 con 2 overrides distintos; todo entero; cada venta cuadra con sus
+    lineas. `computePayoutLines` + `verifyPayoutInvariant` sobre esos datos:
+    **sin problemas y cuadra**. `refunded`/`open` excluidas.
+  - **Desde dentro de `db.transaction`**: resuelve (con consultas `tx` antes y
+    despues) en < 2 s y **no se cuelga** (timeout de 10 s como red).
+  - Determinista (2 llamadas -> igual), otra cadena -> todo vacio, periodos
+    invalidos -> lanza antes de tocar la DB.
+- **Round-trips: 3** consultas (reglas; overrides `barber_locations`⨝`locations`;
+  ventas⨝sedes⨝barberos⨝lineas), medido con `DEBUG_DB_ROUNDTRIPS=1`: 34 lineas
+  de round-trip para 12 llamadas = 3 por llamada (+ BEGIN/COMMIT dentro de tx).
+  Tiempo real (maquina de desarrollo -> Supabase ca-central-1): **~430 ms con
+  `db`, ~550 ms dentro de una transaccion, ~410 ms para 30 dias**; un `select 1`
+  cuesta ~65 ms. Bien por debajo de los 2 s del AC.
+- **Numeros del motor sobre el seed, quincena 1-15 sep 2026** (centavos; renta
+  de silla fija = 2 lunes x 300000; mixta mensual = 200000 por quincena):
+
+  | sede | barbero | regla | serv. | ingreso serv. | comision | renta | propinas | neto |
+  |---|---|---|---|---|---|---|---|---|
+  | Naco | Barbero Uno | percentage | 75 | 2,936,000 | 1,468,000 | 0 | 191,650 | 1,659,650 |
+  | Naco | Barbero Dos | percentage | 62 | 2,439,249 | 1,219,624 | 0 | 178,000 | 1,397,624 |
+  | Naco | Barbero Tres | hybrid | 34 | 1,325,000 | 397,500 | 200,000 | 131,000 | 328,500 |
+  | Bella Vista | Barbero Tres | booth_rent | 12 | 415,000 | 415,000 | 600,000 | 52,500 | **-132,500** |
+  | Bella Vista | Barbero Cuatro | hybrid | 39 | 1,525,667 | 457,700 | 200,000 | 112,250 | 369,950 |
+  | Bella Vista | Barbero Cinco | percentage | 48 | 1,780,833 | 890,416 | 0 | 116,500 | 1,006,916 |
+  | San Cristobal | Barbero Seis | booth_rent | 70 | 2,883,500 | 2,883,500 | 600,000 | 178,000 | 2,461,500 |
+
+  Comprobacion aparte (SQL directo, sin el motor): Naco ingreso RD$67,002.49
+  = 2,936,000+2,439,249+1,325,000 centavos y propinas RD$5,006.50 = 191,650+
+  178,000+131,000; Bella Vista RD$37,215.00 / RD$2,812.50; San Cristobal
+  RD$28,835.00 / RD$1,780.00 (= la linea de Barbero Seis). Barbero Tres aparece
+  con **dos lineas** (una por sede) y su neto total es 328,500 - 132,500 =
+  196,000. Hay **un neto negativo real** (Barbero Tres en Bella Vista, debe
+  RD$1,325.00 a la barberia).
+
+### Contrato para los bloques siguientes (firmas exactas)
+
+```ts
+// src/lib/commissions/index.ts  (puro)
+export type PayoutRuleType = "percentage" | "fixed_per_service" | "booth_rent" | "hybrid";
+export type BoothRentFrequency = "weekly" | "biweekly" | "monthly";
+export interface PayoutRule { id; name; type; serviceBps: number|null; productBps: number|null;
+  boothRentCents: number|null; boothRentFrequency: BoothRentFrequency|null;
+  tipHandling: "barber_keeps_all"|"split_pct"|null; appliesTo: "chain"|"location"|"barber" }
+export interface PayoutInputs { periodStartsOn: string; periodEndsOn: string; barbers: PayoutBarber[];
+  locations: PayoutLocation[]; rules: PayoutRule[]; assignments: PayoutAssignment[]; sales: PayoutSale[] }
+export interface PayoutLine { barberId; locationId; ruleId; ruleType; servicesCount;
+  servicesRevenueCents; productRevenueCents; commissionCents; boothRentDeductedCents;
+  tipsCents; adjustmentsCents; netPayableCents }            // 1:1 con payout_lines (x100)
+export type ComputePayoutResult =
+  | { ok: true; lines: PayoutLine[] }
+  | { ok: false; error: string; problems: PayoutProblem[] };  // code: invalid_period | invalid_input | no_rule | invalid_rule | unsupported_rule_type | unsupported_tip_handling
+export function computePayoutLines(input: PayoutInputs): ComputePayoutResult;
+export function verifyPayoutInvariant(input: { lines: PayoutLine[]; sales: PayoutSale[];
+  periodStartsOn: string; periodEndsOn: string; locations: PayoutLocation[] }): PayoutInvariantResult;
+  // { ok: true; figures } | { ok: false; error; figures; mismatches }  -> figures va en `after` de payout.calculate_failed
+export function prorateDiscount(lineTotalsCents: number[], discountCents: number): number[];
+export function boothRentForPeriod(i: { amountCents; frequency; startsOn; endsOn }): { ok: true; cents } | { ok: false; error };
+export function resolvePayoutRule(i: { barberId; locationId; barbers; locations; rules; assignments }): { ok: true; rule } | { ok: false; problem };
+export function selectPayableSales(sales: PayoutSale[], startsOn: string, endsOn: string): PayoutSale[];
+export function netPayableCents(p: { commissionCents; tipsCents; adjustmentsCents; boothRentDeductedCents }): number;
+export function bpsFromPercentString(value: string): number;   // "57.50" -> 5750 (lanza si es basura)
+export function parseIsoDate(value: string): { year; month; day } | null;
+
+// src/lib/commissions/load-payout-inputs.ts  (server, `import "server-only"`)
+export type PayoutReadExecutor = Pick<typeof db, "select">;
+export async function loadPayoutInputs(
+  params: { chainId: string; startsOn: string; endsOn: string },
+  executor: PayoutReadExecutor,        // db o tx; SIN default
+): Promise<PayoutInputs>;
+```
+
+Como consumirlo en F3-05 (una sola transaccion): `select ... for update` del
+periodo con `tx` -> `loadPayoutInputs({...}, tx)` -> `computePayoutLines` (si
+`!ok`: abortar y auditar `payout.calculate_failed` con `problems`) ->
+`verifyPayoutInvariant` (si `!ok`: abortar y auditar con `figures`) -> `delete` +
+`insert` de `payout_lines` convirtiendo centavos con `decimalStringFromCents` ->
+`writeAuditLog(..., tx)`. Aprobado/pagado nunca se recalcula.
+
+### Bugs y hallazgos nuevos
+
+1. **`Promise.all` sobre el pool `max: 1` cuelga el cliente `postgres.js`
+   (BUG DE CLASE NUEVO, reproducido).** Al medir los round-trips del loader, un
+   script con `db.execute(sql\`select ...\`)` lanzado 5 veces en `Promise.all`
+   **fuera de una transaccion** tardo 651-713 ms (una consulta sola: 65 ms) y en
+   la segunda rafaga (5 x `select 1` identicos) **la promesa nunca resolvio; todas
+   las consultas siguientes de ese cliente hicieron timeout** hasta matar el
+   proceso. Dentro de una `db.transaction` la misma tecnica si funciono (los
+   tests del loader la usaron primero y pasaron: por eso casi se queda). Causa
+   raiz: **no confirmada**; hipotesis: `postgres.js` encola las consultas
+   concurrentes en pipeline sobre la unica conexion y Supavisor en modo
+   transaccion (puerto 6543, `prepare: false`) las reparte mal fuera de una
+   transaccion. Es coherente con la nota de la tarea de `getAvailability` ("sin
+   `Promise.all` que solo solapa"). **Arreglo:** el loader es secuencial (3
+   consultas) y hay un test estatico que prohibe `Promise.all` en el. **Matiz
+   importante:** la app YA usa `Promise.all` con consultas en ~10 sitios (paginas
+   `today`, `checkout`, `queue`, `calendar`, la publica de sede, y `checkout.ts`/
+   `queue.ts`) y los E2E pasan, asi que **no esta demostrado que esos sitios
+   fallen**; lo reproducido es el cuelgue en un script suelto con 5 `select 1`
+   identicos. **Regla para codigo NUEVO de F3: nada de `Promise.all` con consultas
+   de DB** (barato de evitar, y el cierre de periodo corre en una transaccion
+   donde no aporta nada).
+2. **`public-booking.concurrency.test.ts` era fragil y rompio al re-sembrar.**
+   Elegia "el barbero" con `barber_locations where location = Naco limit 1` sin
+   `ORDER BY`. `barber_locations` tambien lista a los admins; al reescribirse las
+   filas con el `UPDATE commission_rule_id` del seed nuevo, Postgres devolvio
+   primero al Admin Naco (sin horario) y el 2o test fallo con "El barbero de
+   prueba no tiene horario sembrado en Naco". Arreglo: elegir un barbero con
+   `schedules` activos en Naco (join + `ORDER BY user_id`). La BD queda identica
+   a la linea base tras el test.
+3. **D-F3-8 dice "en una quincena caen 2 o 3 lunes": es falso para el 16-28 de
+   febrero** (13 dias -> 1 o 2). No afecta la formula (se cuentan lunes reales) ni
+   el total anual (52/53); esta cubierto por el oraculo de 2024-2032. Avisar al
+   PM para que corrija el copy ("dos o tres lunes" en el texto de la UI).
+4. **`sale_items` no tiene `created_at`**, asi que "la primera linea por orden de
+   creacion" (D-F3-5, desempate del residuo) no es recuperable de la DB. El
+   loader ordena por `sale_items.id` (deterministico: recalcular da el mismo
+   resultado). Solo cambia a quien va un centavo cuando dos lineas de igual
+   monto empatan en un descuento con residuo. **Escalar al PM** si importa.
+
+### Decisiones tomadas sin respaldo explicito en el backlog
+
+1. **`applies_to = 'barber'`** para las reglas de override sembradas (502, 503).
+   El backlog solo dice que `'location'` no se usa; `'chain'` es unico; `'barber'`
+   es el valor natural de "regla asignada a barberos concretos". F3-04 (UI) debe
+   decidir si lo conserva.
+2. **Ventas historicas con `cash_session_id = null`**: no se sembraron cajas por
+   dia para no tocar las cajas de Naco que usan los E2E 03/04/07 (las snapshotean
+   todas) ni inflar `cash_sessions`. Consecuencia: la caja abierta de hoy sigue
+   siendo el unico bloqueador D-F3-10.2 del seed; el escenario "Descuentos sin
+   motivo" no existe en el seed (habria bloqueado la aprobacion para siempre): los
+   tests del bloque B deben insertarlo ellos.
+3. **24 clientes de historia** (ids `...-4…`, telefonos `809-555-05NN`) para que
+   `unique_clients`/`new_clients` de las metricas tengan variedad; las ventas
+   solo usan clientes ya creados en el momento de la venta. Las 5 ventas de ayer
+   de F2-24 y las citas no se tocaron.
+4. **Solo pares con actividad generan linea**: un barbero de silla fija que no
+   vende ni recibe propinas en el periodo no aparece y por tanto **no se le
+   imputa renta**. Es lo literal del backlog ("periodo sin ventas => cero
+   lineas"), pero es un hueco de producto: **preguntar al PM** si la renta debe
+   cobrarse igual (implicaria que el motor reciba la lista de asignaciones con
+   regla `booth_rent`/`hybrid` y genere lineas sin ventas).
+5. **Redondeo una sola vez por linea de pago** sobre el ingreso agregado del
+   (barbero, sede), no por venta ni por linea de ticket.
+6. **`adjustments` sale siempre en 0 del motor.** Como recalcular borra e inserta
+   las lineas (D-F3-9), un recalculo tras un `adjustPayoutLine` perderia el
+   ajuste: **F3-05 debe releer y reaplicar los ajustes** (o prohibir recalcular
+   despues de ajustar). Se exporta `netPayableCents` para recomponer el neto.
+7. **Alquiler mensual exige un periodo que sea quincena calendario** (1-15 o
+   16-fin de mes); si no, problema `invalid_period` con el nombre del barbero.
+   `weekly` y `biweekly` funcionan con cualquier rango.
+8. **`loadPayoutInputs` deriva `locations` y `barbers` de las ventas del rango**
+   (solo se usan para nombrar en los mensajes de error, y los errores solo
+   nombran pares con ventas). No sirve como lista de sedes de la cadena: los
+   bloqueadores de F3-05 (cajas abiertas, ventas `open`, descuentos sin motivo)
+   necesitan sus propias consultas.
+9. **Herramienta nueva `scripts/db-baseline.ts`** (solo lectura): `count(*)` y md5
+   del contenido por tabla para comprobar idempotencia y que una corrida de
+   tests/E2E no deja residuo. Y el script `npm run test:coverage`.
+10. **Mensajes de error con tildes** (a diferencia de `lib/pos`, que las omite):
+    son texto que vera un gerente.
+
+### Deuda abierta
+
+- Sin metricas historicas de no-show: el seed no tiene citas pasadas
+  (`no_shows` de `location_daily_metrics` saldra 0). Si el bloque C quiere
+  ejercitar la tasa de no-show, hay que sembrar citas historicas (cuidando el
+  `EXCLUDE`).
+- El seed de ventas de "hoy" cambia de hora en cada corrida (ancladas a `now`);
+  el resto de la historia cambia de fecha al pasar los dias.
+- `loadPayoutInputs` mide ~430 ms por llamada por la latencia de red a
+  Supabase; en Workers cada request abre su propia conexion (~0.4 s extra, ver
+  la entrada del runtime). Aceptable para una accion manual de cierre; no para un
+  dashboard en vivo (ese usara `location_daily_metrics`).
+- La causa raiz del cuelgue de `Promise.all` no esta confirmada (ver arriba);
+  hay ~10 usos existentes de `Promise.all` con consultas (`grep -rn "Promise.all"
+  src`), sin fallos observados en los E2E; conviene un spike aislado con
+  `postgres.js` + Supavisor 6543 vs conexion directa 5432 para confirmar la causa.
+- Sigue abierto todo lo del CHANGELOG anterior (rotacion de claves de Supabase,
+  Worker desplegado desactualizado, `lookupClientHistoryAction`, efectos de
+  `voidSaleAction` sobre `clients.total_*`).
+
+
 ## 2026-09-18 — Auditoria de endpoints "use server", credenciales de Supabase y cierre de la tanda de deuda
 
 Entrada de coordinacion: junta lo que no quedo en las entradas de los agentes
