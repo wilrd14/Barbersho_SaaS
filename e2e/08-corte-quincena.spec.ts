@@ -212,6 +212,55 @@ test.describe.serial("Corte de Quincena", () => {
     await expect(row).toContainText(`RD$ ${money(freshNet)}`);
   });
 
+  test("el barbero ve Lo mio y su recibo del corte cerrado, coincide con su linea y no puede ver el de otro", async ({ page }) => {
+    test.setTimeout(120_000);
+    expect(periodId).not.toBe("");
+    const mine = await testDb
+      .select()
+      .from(payoutLines)
+      .where(and(eq(payoutLines.payoutPeriodId, periodId), eq(payoutLines.barberId, SEED_IDS.barbero1Id)));
+    expect(mine.length).toBeGreaterThan(0);
+    const myNet = mine.reduce((s, l) => s + Math.round(Number(l.netPayable) * 100), 0);
+    const myTips = mine.reduce((s, l) => s + Math.round(Number(l.tipsAmount) * 100), 0);
+
+    await loginAs(page, BARBER_1);
+
+    // Mi Silla: "Lo mio" de la quincena en curso (dato real, no el mock de F2).
+    await page.goto("/mi-silla");
+    await expect(page.getByRole("heading", { name: /^Mi Silla — Barbero/ })).toBeVisible();
+    await expect(page.getByText("Lo mío — esta quincena")).toBeVisible();
+    await expect(page.getByText("Actualizado hace 12 min")).toHaveCount(0); // el banner de demostracion ya no esta
+    await expect(page.getByTestId("lo-mio-monto")).toContainText("RD$");
+    await page.getByRole("link", { name: "Ver recibo completo" }).click();
+    await page.waitForURL("**/earnings");
+
+    // Historico de recibos cerrados: el corte de esta prueba, con el neto exacto de su linea.
+    const item = page.getByRole("listitem").filter({ hasText: LABEL });
+    await expect(item).toContainText("Pagado");
+    await expect(item).toContainText(`RD$${money(myNet)}`);
+    await item.getByRole("link", { name: LABEL }).click();
+    await page.waitForURL(/\/mi-silla\/recibo\/[0-9a-f-]{36}$/);
+
+    const receipt = page.getByRole("article", { name: /Recibo de Barbero Uno/ });
+    await expect(receipt).toBeVisible();
+    await expect(receipt).toContainText(`RD$ ${money(myTips)}`); // propinas
+    await expect(receipt.getByText(/Neto en Naco/)).toBeVisible();
+    // Solo lo suyo: ningun otro barbero en la pantalla.
+    await expect(page.getByText("Barbero Dos")).toHaveCount(0);
+    await expect(page.getByText("Barbero Tres")).toHaveCount(0);
+
+    // Por URL directa: un corte que no existe -> 403.
+    const missing = await page.goto("/mi-silla/recibo/00000000-0000-0000-0000-00000000abcd");
+    expect(missing?.status()).toBe(403);
+    // Y el barbero no entra al Corte del gerente (ya cubierto arriba), ni a las lecturas de dinero de otras sedes.
+    await page.context().clearCookies();
+
+    // Un admin (sin membership de barbero) tampoco ve recibos por esta ruta.
+    await loginAs(page, SEED.adminNaco);
+    const asAdmin = await page.goto(`/mi-silla/recibo/${periodId}`);
+    expect(asAdmin?.status()).toBe(403);
+  });
+
   test("un admin y un barbero reciben 403 en (chain)/commissions, incluido el corte por URL directa", async ({ page }) => {
     for (const email of [SEED.adminNaco, BARBER_1]) {
       await loginAs(page, email);
