@@ -11,10 +11,10 @@
 import { z } from "zod";
 
 import { zUuid } from "@/lib/validation/id";
-import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { cashSessions, sales, users } from "@/lib/db/schema";
+import { cashSessions, clients, locations, saleItems, sales, services, users } from "@/lib/db/schema";
 import { requireLocationScope } from "@/lib/auth/guards";
 import { writeAuditLog } from "@/lib/auth/audit";
 import { actionError, actionOk, type ActionResult } from "@/types/action-result";
@@ -50,6 +50,12 @@ export type CashRegisterState = {
 };
 
 export async function loadCashRegisterState(locationId: string): Promise<CashRegisterState> {
+  // Este modulo es "use server": toda funcion exportada es tambien un endpoint
+  // invocable desde el cliente, asi que el guard va AQUI y no solo en la
+  // pagina que la llama (antes cualquier usuario autenticado podia pedir el
+  // estado de caja de cualquier sede pasando su id).
+  await requireLocationScope(locationId);
+
   const [openRow] = await db
     .select({
       id: cashSessions.id,
@@ -104,6 +110,90 @@ export async function loadCashRegisterState(locationId: string): Promise<CashReg
     : null;
 
   return { openSession, lastClosedSession };
+}
+
+// ---------------------------------------------------------------------------
+// Lectura de ventas de la caja abierta — F2-22 (UI de anulacion)
+// ---------------------------------------------------------------------------
+
+export type OpenSessionSale = {
+  id: string;
+  /** Hora local de la sede, ya formateada en el servidor (evita desfases de zona horaria al hidratar). */
+  timeLabel: string;
+  clientName: string;
+  /** Nombres de los servicios de la venta, separados por coma. */
+  itemsLabel: string;
+  paymentMethod: "cash" | "card" | "transfer" | "mixed" | "online";
+  totalCents: number;
+  status: "open" | "paid" | "refunded";
+};
+
+/**
+ * Ventas de la caja abierta de la sede (mas recientes primero), incluidas las
+ * ya anuladas (se muestran marcadas, sin boton). Solo gerente: la lista existe
+ * para anular, y anular es solo de admin/superuser (F2-22).
+ * Devuelve [] si no hay caja abierta.
+ */
+export async function listOpenSessionSales(locationId: string): Promise<OpenSessionSale[]> {
+  const scope = await requireLocationScope(locationId);
+  assertManagerRole(scope);
+
+  const [session] = await db
+    .select({ id: cashSessions.id })
+    .from(cashSessions)
+    .where(and(eq(cashSessions.locationId, scope.locationId), isNull(cashSessions.closedAt)))
+    .limit(1);
+  if (!session) return [];
+
+  const rows = await db
+    .select({
+      id: sales.id,
+      createdAt: sales.createdAt,
+      clientName: clients.fullName,
+      paymentMethod: sales.paymentMethod,
+      total: sales.total,
+      status: sales.status,
+      timezone: locations.timezone,
+    })
+    .from(sales)
+    .innerJoin(clients, eq(clients.id, sales.clientId))
+    .innerJoin(locations, eq(locations.id, sales.locationId))
+    .where(and(eq(sales.cashSessionId, session.id), eq(sales.locationId, scope.locationId)))
+    .orderBy(desc(sales.createdAt));
+
+  if (rows.length === 0) return [];
+
+  const itemRows = await db
+    .select({ saleId: saleItems.saleId, serviceName: services.name })
+    .from(saleItems)
+    .leftJoin(services, eq(services.id, saleItems.serviceId))
+    .where(
+      inArray(
+        saleItems.saleId,
+        rows.map((r) => r.id),
+      ),
+    );
+
+  const namesBySale = new Map<string, string[]>();
+  for (const item of itemRows) {
+    const list = namesBySale.get(item.saleId) ?? [];
+    list.push(item.serviceName ?? "Producto");
+    namesBySale.set(item.saleId, list);
+  }
+
+  return rows.map((r) => ({
+    id: r.id,
+    timeLabel: new Intl.DateTimeFormat("es-DO", {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: r.timezone,
+    }).format(r.createdAt),
+    clientName: r.clientName,
+    itemsLabel: (namesBySale.get(r.id) ?? []).join(", ") || "Venta",
+    paymentMethod: r.paymentMethod,
+    totalCents: centsFromDecimalString(r.total),
+    status: r.status,
+  }));
 }
 
 // ---------------------------------------------------------------------------
