@@ -143,6 +143,10 @@ export async function loadCheckoutCatalog(locationId: string): Promise<{
   services: CheckoutCatalogService[];
   barbers: CheckoutCatalogBarber[];
 }> {
+  // Modulo "use server": toda funcion exportada es tambien un endpoint
+  // invocable desde el cliente, asi que el guard va aqui y no solo en la pagina.
+  await requireLocationScope(locationId);
+
   const [serviceRows, barberRows] = await Promise.all([
     db
       .select({
@@ -199,6 +203,9 @@ export async function loadAppointmentForCheckout(
   locationId: string,
   appointmentId: string,
 ): Promise<CheckoutAppointmentInfo | null> {
+  // Modulo "use server": ver nota en loadCheckoutCatalog.
+  await requireLocationScope(locationId);
+
   const [row] = await db
     .select({
       id: appointments.id,

@@ -702,6 +702,10 @@ export type QueueSnapshot = {
 };
 
 export async function loadQueueSnapshot(locationId: string): Promise<QueueSnapshot> {
+  // Modulo "use server": toda funcion exportada es tambien un endpoint
+  // invocable desde el cliente, asi que el guard va aqui y no solo en la pagina.
+  await requireLocationScope(locationId);
+
   const rows = await db
     .select({
       id: walkInQueue.id,
@@ -808,6 +812,9 @@ export type AttendingNowEntry = {
 };
 
 export async function loadAttendingNow(locationId: string): Promise<AttendingNowEntry[]> {
+  // Modulo "use server": ver nota en loadQueueSnapshot.
+  await requireLocationScope(locationId);
+
   const [activeBarberRows, inProgressRows] = await Promise.all([
     db
       .select({ id: users.id, fullName: users.fullName })
