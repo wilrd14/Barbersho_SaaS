@@ -1,5 +1,40 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — Tercer bug real: crash pre-existente en La Fila (time_off)
+
+Al correr la suite Playwright completa para cerrar la auditoria de arriba,
+`02-dar-turno.spec.ts` (uno de los 4 E2E originales de F2-25, no tocado por
+esa auditoria) fallo. Confirmado como bug pre-existente, no relacionado con
+el deadlock de `resolveEffectiveServiceFor`/`writeAuditLog` (bug de clase
+distinta):
+
+- **Causa:** `getAvailableBarbers()` en `src/lib/actions/queue.ts`
+  interpolaba un objeto `Date` crudo dentro de un template `sql` de
+  Drizzle (`sql`${timeOff.startsAt} <= ${now}``). El `sql` de Drizzle no
+  hace la auto-serializacion de `Date` que si hace el `sql` propio de
+  `postgres.js` cuando se usa como template tag directo — el driver recibe
+  el `Date` en su path de bajo nivel de bind de parametros, que exige
+  string/Buffer, y lanza `TypeError [ERR_INVALID_ARG_TYPE]`. Drizzle lo
+  envuelve como un "Failed query" generico sin pista de la causa real;
+  se aislo reproduciendo la query exacta fuera de la app.
+- **Fix:** interpolar `now.toISOString()` en vez del `Date` crudo. Se
+  revisaron todos los demas usos de `sql\`` en `src/lib` — ningun otro
+  interpola un `Date` sin convertir.
+- Efecto secundario detectado y limpiado (no arreglado de raiz): correr
+  `npm run db:seed` en un dia distinto al del ultimo seed puede chocar con
+  el `EXCLUDE` constraint de forma transitoria, porque el seed actualiza
+  las citas de F2-24 (ancladas a "ahora") fila por fila dentro de una sola
+  transaccion y el constraint no es `DEFERRABLE` — una fila recien
+  actualizada puede solaparse momentaneamente con una hermana que todavia
+  no se actualizo. Se limpiaron las dos filas afectadas a mano en Supabase
+  para poder re-sembrar; **queda como deuda tecnica documentada, no
+  resuelta**: la forma correcta es o declarar el constraint
+  `DEFERRABLE INITIALLY DEFERRED`, o reescribir el seed para borrar e
+  insertar esas filas en vez de actualizarlas en el mismo orden cada vez.
+- Verificado: los 6 E2E de Playwright (los 4 originales + los 2 de la
+  auditoria de abajo) en verde, 103 tests de Vitest, typecheck, lint y
+  `npm run build` completo, todos en verde.
+
 ## 2026-09-18 — Auditoria post-F2-25: los 3 caminos de dinero/auditoria que faltaban por probar
 
 F2-25 (arriba) cerro 4 flujos criticos con E2E reales y corrigio 2 bugs de
