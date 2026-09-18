@@ -55,3 +55,7 @@ next-env.d.ts
 # auto-generado por next dev (agentRules), deshabilitado en next.config.ts
 /AGENTS.md
 /CLAUDE.md
+
+# wrangler dev: variables locales del Worker (contienen secretos, jamas commitear)
+.dev.vars
+.dev.vars.*
