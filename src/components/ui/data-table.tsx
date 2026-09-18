@@ -15,6 +15,12 @@ export interface DataTableColumn<T> {
   sortable?: boolean
   /** Requerido cuando type es money/number/percent/delta, ignorado para "text". */
   accessor: (row: T) => React.ReactNode | number
+  /**
+   * Opcional: pinta la celda con este nodo en vez del render por tipo. `accessor`
+   * sigue siendo el valor de ORDEN (numero para money/number/percent). Sirve para
+   * casos como el neto negativo en rojo o un guion en vez de un monto.
+   */
+  render?: (row: T) => React.ReactNode
   /** Para type="delta": debe devolver los props de TrendIndicator. */
   trend?: (row: T) => TrendIndicatorProps
   /** Fila con desviacion fuerte: borde izquierdo --data-neg, nunca fondo completo. */
@@ -136,7 +142,9 @@ function DataTable<T>({
                         stickyFirstColumn && i === 0 && "sticky left-0 z-10 bg-(--surface-card)"
                       )}
                     >
-                      {col.type === "money" ? (
+                      {col.render ? (
+                        col.render(row)
+                      ) : col.type === "money" ? (
                         <MoneyDisplay amount={Number(col.accessor(row))} align="right" />
                       ) : col.type === "delta" && col.trend ? (
                         <div className="flex justify-end">

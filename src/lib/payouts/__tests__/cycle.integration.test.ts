@@ -189,7 +189,7 @@ describe("calculatePeriodInTx (F3-05)", () => {
       const second = expectOk(await calculatePeriodInTx(tx, { ...scopeArgs, periodId }));
       expect(second).toMatchObject({ recalculated: true, lineCount: 3 });
       const again = await loadStoredLines(tx, periodId);
-      const strip = (ls: typeof lines) => ls.map(({ id: _id, ...rest }) => rest);
+      const strip = (ls: typeof lines) => ls.map((l) => ({ ...l, id: "-" }));
       expect(strip(again)).toEqual(strip(lines));
       const count = await tx.select({ n: sql<number>`count(*)::int` }).from(payoutLines).where(eq(payoutLines.payoutPeriodId, periodId));
       expect(count[0]!.n).toBe(3);
