@@ -1,5 +1,214 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — E2E que limpian lo suyo + flujo de dinero verificado en workerd (y un bug grave de runtime)
+
+Dos tareas, cuatro hallazgos reales (uno critico de Cloudflare, dos de higiene
+de la BD de pruebas, uno de `.gitignore`). **Estado final verificado, en este
+orden:** `npm run typecheck` (exit 0), `npm run lint` (0 errores; 1 warning
+ajeno en `coverage/block-navigation.js`, archivo generado), `npm run test`
+(12 archivos, **131 tests**, verde; corrido 2 veces seguidas sin deriva en la
+BD), `npm run build` completo (25 rutas, Turbopack) y la suite Playwright
+completa: **7 de 7 en verde** contra `next dev`, contra `next start` y (tras el
+fix) contra **workerd**, 2 corridas completas alli. Sin `npm run deploy`, sin
+tocar `wrangler.jsonc`, `.env.local` ni credenciales (ningun valor secreto
+impreso ni commiteado).
+
+Commits (en orden): `af502ca` (E2E limpian), `3e682d9` (Playwright
+`E2E_BASE_URL` + `.dev.vars` en `.gitignore`), `a5b7212` (fix del cliente
+postgres.js por request en Workers), `b42b6d5` (test de concurrencia ya no
+borra el seed ni deja audit_log), mas el commit de este CHANGELOG.
+
+### Tarea 1 — Los E2E 01-04 limpian sus propios datos
+
+- **Problema:** `01-reservar`, `02-dar-turno`, `03-cobrar` y `04-cerrar-caja`
+  dejaban residuo en el Supabase real (clientes "Cliente E2E ...", "Walkin E2E
+  ...", citas, turnos, ventas, cajas, `audit_log`). Al empezar la sesion la BD
+  ya tenia residuo de una corrida previa (appointments 9, walk_in_queue 4,
+  sales 6, clients 8, audit_log 4) y `npm run db:seed` **no** lo borra (solo
+  hace upsert de sus IDs fijos).
+- **Dos causas de fondo, ademas de "no borran":**
+  1. **04 CIERRA la caja abierta del seed (`...1001`)** y 03/07 necesitan una
+     abierta: borrar filas no basta, hay que **restaurar** la fila del seed
+     (`closed_at`, `closed_by`, `expected_cash`, `counted_cash`, `difference`).
+  2. **`joinQueue` reescribe `position`/`estimated_wait_minutes` de los turnos
+     hermanos** (`recalcQueueState`), asi que agregar un walk-in muta filas del
+     seed aunque despues se borre el nuevo: tambien hay que restaurarlas.
+- **Solucion (`e2e/db-helpers.ts`, todo con el `testDb` de los E2E):**
+  - `notSeedId(col)`: segunda barrera SQL (`::text not like
+    '00000000-0000-0000-0000-%'`) en todo DELETE; un filtro equivocado nunca
+    llega a una fila de ID fijo. (Ojo: los 2 clientes con cuenta del seed,
+    "Cliente Uno/Dos", NO tienen ID fijo — se identifican solo por
+    nombre/telefono, nunca por prefijo.)
+  - `findE2eClientIds({phone|fullName})` + `purgeClients(ids)`: borra clientes y
+    lo que cuelga (citas, ventas con `sale_items` por cascade, turnos de la fila
+    y sus filas de `audit_log`) en orden seguro respecto a las FK
+    (`sales.client_id` es RESTRICT). El telefono se busca crudo y normalizado
+    (`+1` + 10 digitos, como guardan las actions).
+  - `snapshotCashState()` / `restoreCashState()`: foto de todas las cajas de
+    Naco + sus IDs de audit antes del spec; despues borra las cajas nuevas (y su
+    audit), **restaura las columnas de las existentes** (reabre la del seed) y
+    borra el audit que el spec genero sobre cajas ya existentes (`cash.close`),
+    identificado por "no estaba en la foto" (no por reloj: evita desfases entre
+    el reloj del test y el `now()` de la DB).
+  - `snapshotQueue()` / `restoreQueue()`: lo mismo para `walk_in_queue` de Naco.
+  - Specs: 01 usa un `PHONE` unico por corrida y `afterAll` purga por telefono;
+    02 foto de la fila en `beforeAll`, `afterAll` purga por nombre unico y
+    restaura la fila; 03 purga por telefono y restaura cajas; 04 restaura cajas.
+    Los `afterAll` corren tambien si el test falla (comprobado: una corrida con
+    5 fallos por otra causa dejo la BD identica al seed).
+  - El orden 03 -> 04 ya no importa (cada spec deja las cajas como las encontro).
+- **Residuo previo:** se limpio con `purgeClients` (3 clientes E2E) mas 4 filas
+  de `audit_log` identificadas por ID, y se re-sembro. Un primer intento de
+  borrar todo `audit_log` con SQL directo fue bloqueado por el clasificador de
+  permisos y se sustituyo por lo anterior (borrado acotado por entidad/ID).
+- **Verificacion con numeros reales** (`count(*)` + `md5` del contenido de cada
+  fila ordenada por id, por tabla, antes/despues; script en el scratchpad de la
+  sesion, no commiteado). Baseline tras `npm run db:seed`: appointments 8,
+  walk_in_queue 3, cash_sessions 2, sales 5, sale_items 5, clients 5, audit_log
+  0, time_off 0 (+ notifications/stock_movements/payout_periods 0). Suite
+  completa **2 veces seguidas** contra `next dev`: tras la corrida 1 y tras la
+  corrida 2, **conteos Y hashes de las 11 tablas identicos al baseline** (no
+  solo el conteo: tambien position/ETA de la fila y la caja reabierta). Igual
+  tras 2 corridas completas en workerd, 1 en `next start` y 1 final en `next dev`.
+- **Deuda que queda:** la limpieza de 05/06/07 no se toco (ya limpian). Los
+  helpers asumen `workers: 1` y una sola sede (Naco); si se paraleliza la suite
+  o se prueba otra sede, hay que generalizar las fotos. Si un spec muere a mitad
+  de proceso (kill -9) el `afterAll` no corre; el siguiente `db:seed` no borra
+  ese residuo (queda `purgeClients`/limpieza manual).
+
+### Tarea 2 — Flujo de dinero en el runtime real de Cloudflare (workerd)
+
+**Metodo:** `npx opennextjs-cloudflare build` (1m06s) + `npx opennextjs-cloudflare
+preview` (wrangler dev en http://127.0.0.1:8787, en background), variables via
+`.dev.vars` (creado copiando SOLO `DATABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+`NEXT_PUBLIC_SITE_URL` desde `.env.local`; **`.dev.vars` no estaba en
+`.gitignore`** — se agrego junto con `.dev.vars.*` ANTES de crearlo, y
+`git check-ignore` confirma que esta ignorado). Playwright apunta al worker con
+la nueva env `E2E_BASE_URL` (si esta definida, no se lanza `webServer` y se usa
+como `baseURL`; sin ella el comportamiento es el de siempre).
+
+- **Resultado 1 (antes del fix): fallo total.** Los 7 specs fallaron. Sintoma:
+  HTTP 500 con "The Workers runtime canceled this request because it detected
+  that your Worker's code had hung and would never generate a response" en toda
+  ruta que toca la DB, salvo la primera request tras arrancar wrangler.
+- **Reproduccion aislada:** reiniciar wrangler y hacer `curl` repetido a una
+  ruta de lectura (`/don-bigote/book`): **1a request 200 (0.90 s), 2a y 3a 500
+  en ~50 ms**; con el fix, 4 de 4 en 200. Es decir, el "spike de Workers" de
+  S1-04 solo habia probado la primera lectura tras el arranque.
+- **Causa raiz (BUG NUEVO, critico en produccion):** `src/lib/db/client.ts`
+  guardaba el cliente `postgres.js` en una variable de modulo (singleton),
+  patron correcto en Node. En workerd un socket TCP (`connect()`) pertenece a la
+  request que lo abrio: la segunda request del mismo isolate reutilizaba un
+  cliente cuyo socket era de una request ya terminada, la promesa nunca se
+  resolvia y workerd cancelaba la request. Ninguna prueba en Node podia verlo, y
+  habria roto **toda** ruta con DB en el Worker desplegado tras la primera
+  request (el deploy privado de F2 solo se habia mirado en rutas estaticas/login).
+- **Solucion:** el cliente ahora se cachea **por request** en Workers: OpenNext
+  publica un almacen nuevo por request en `globalThis[Symbol.for(
+  "__cloudflare-context__")]` (AsyncLocalStorage, `.open-next/cloudflare/
+  init.js`); su identidad es la llave de un `WeakMap<object, Db>`. Dentro de una
+  request, todas las llamadas (incluidas las transacciones con `max: 1`)
+  comparten el mismo cliente (no se rompe la regla del pool ni de `tx`); fuera de
+  Workers ese simbolo no existe y se usa el singleton de Node como siempre
+  (`next dev`/`start`/Vitest/scripts sin cambios de comportamiento). Archivo:
+  `src/lib/db/client.ts`.
+- **Resultado 2 (con el fix), 2 corridas completas contra workerd: 14/14 specs
+  en verde**, 0 respuestas 500 en el log de wrangler, BD identica al baseline
+  tras cada corrida. Rafagas de humo: 20 GET secuenciales + 12 en paralelo a una
+  ruta con DB, 32/32 en 200. Conexiones: `pg_stat_activity` no muestra
+  acumulacion (12-13 idle, todas de servicios de Supabase y 2 de Supavisor, igual
+  antes y despues de apagar wrangler): no hay fuga de conexiones por request.
+- **Lo que SI funciono en workerd sin cambios:** TCP directo a Supabase con
+  `nodejs_compat`; escrituras dentro de `db.transaction` con pool `max: 1` (los
+  deadlocks de F2-25 no reaparecen: `writeAuditLog`/`resolveEffectiveServiceFor`
+  con `tx` estan sanos); `cash.open/close`, `sale.create`, `sale.refund`,
+  `appointment.book_public`, `appointment.reschedule`, cancelacion del cliente y
+  `joinQueue` con sus `audit_log` reales; el `EXCLUDE` anti doble-booking; login
+  con Supabase Auth (cookies) y guards de sede; el fix de `Date` en `time_off`.
+  Ninguna diferencia funcional de comportamiento frente a Node.
+- **Tiempos medidos (mismo Supabase real, misma maquina):**
+  - Suite Playwright completa (7 specs, suma de duraciones): `next start` 49.2 s;
+    `next dev` 67.9 s (corrida 1) / 64.3 s (final); **workerd 66.8 s (corrida 1)
+    / 61.3 s (corrida 2)**. O sea workerd ~1.25x `next start` y a la par de
+    `next dev`.
+  - Por spec, workerd vs `next start` (s): 01 10.3-12.6 vs 6.8; 02 11.3-11.5 vs
+    9.8; 03 5.8-6.0 vs 5.3; 04 5.0-5.3 vs 4.4; 05 5.4-5.6 vs 4.3; 06 7.3-8.8 vs
+    6.8; 07 13.7-19.5 vs 11.8.
+  - GET de una ruta con lectura de DB (`/don-bigote/book`): **workerd ~0.78 s
+    (media de 20 seguidas; min 0.69, max 0.87 salvo el arranque en frio 1.26 s)
+    vs Node `next start` 0.275 s.** La diferencia (~0.4-0.5 s por request) es el
+    costo de abrir una conexion nueva por request (TCP + TLS/auth con Supavisor +
+    carga de tipos `pg_type` de postgres.js), que en Node se amortiza con el
+    singleton. En paralelo (12 a la vez) 0.81-0.91 s: no se serializan.
+  - Server Actions (POST, log de wrangler): `/queue` (dar turno) media 2.2 s (max
+    3.8 s), `/checkout` (cobro) 2.3 s, `/register` (abrir/cerrar/anular) 1.4 s,
+    `/today` (reprogramar) 1.7 s, `/appointments` (cancelar) 1.4 s, reserva
+    publica 1.5 s (max 3.5 s), login 0.38 s media (muestras pequenas: n=1 a 6
+    por ruta). Ninguno cerca del timeout de 30 s de los specs; cada accion paga
+    1-N idas y vueltas a Supabase (ca-central-1) desde la maquina de desarrollo,
+    asi que en produccion (worker en el borde, mas cerca de la region de la DB)
+    deberian ser menores; no se midio en produccion porque no se despliega en
+    esta sesion.
+- **Deuda / riesgos que quedan del runtime:**
+  1. **Costo de conexion por request (~0.4 s).** Opciones, sin hacer hoy:
+     `fetch_types: false` en postgres.js (evita la consulta de tipos en cada
+     conexion; hay que validar los arrays `text[]` de `clients.tags`),
+     Cloudflare Hyperdrive (pool + cache de conexiones a nivel de plataforma, es
+     la solucion recomendada), o reducir round-trips por accion.
+  2. No se cierran explicitamente los clientes por request (`client.end()` /
+     `ctx.waitUntil`): workerd cierra los sockets al terminar la request y no se
+     vio acumulacion en `pg_stat_activity`, pero conviene revisarlo bajo carga
+     real con el Supavisor de produccion (limite de conexiones del pooler).
+  3. Esto se verifico en **wrangler dev local** (workerd real, pero red desde la
+     maquina de desarrollo); no en el Worker desplegado. Los limites de CPU/
+     memoria y de subrequests de Workers en produccion no se ejercitaron.
+  4. `src/lib/db/client.ts` conserva el comentario historico de que el spike no
+     se ejecuto end-to-end; ahora si se ejecuto (esta entrada lo documenta).
+
+### Otros hallazgos corregidos
+
+- **`npm run test` borraba una fila del seed y dejaba `audit_log` huerfano**
+  (`src/lib/actions/__tests__/public-booking.concurrency.test.ts`). Detectado
+  porque, tras `npm run test`, la BD dejo de ser identica al seed (appointments
+  8 -> 7, audit_log 0 -> 1). Causa: el bloque de "auto-reparacion" del test
+  borraba las citas del barbero 1 con `price_at_booking = 500.00` y `source =
+  admin`, marca que **tambien cumple la cita fija del seed `...0801`** (Fade a
+  RD$500 del barbero 1); y el `createPublicBookingAction` real del segundo caso
+  escribe `audit_log` `appointment.book_public` que el test nunca borraba (una
+  fila huerfana por corrida; era el origen de una de las 4 filas de audit que ya
+  habia al empezar). Fix: se excluyen los IDs fijos del seed del DELETE de
+  auto-reparacion y se borra el `audit_log` de las citas creadas. Verificado:
+  reseed + `npm run test` x2 -> conteos y hashes identicos al baseline (131
+  tests en verde). La fila huerfana que la corrida previa al fix habia dejado
+  se borro por ID.
+- **Observacion de entorno (no es bug del repo):** en esta maquina el puerto
+  3000 lo ocupa el `next dev` de OTRO proyecto (`...\SaaS\Agendalo`). Con la
+  config por defecto (`reuseExistingServer`), `npx playwright test` habria
+  reutilizado ESE servidor y probado la app equivocada (falla con 404/timeouts
+  enganosos). No se toco ese proceso. Por eso las corridas "contra next dev" de
+  esta sesion se hicieron con un `next dev -p 3100` propio + `E2E_BASE_URL=
+  http://localhost:3100` (mismo codigo, mismo modo dev). Ademas, la primera
+  instancia de `next dev` en 3100 sirvio 404 en todas las rutas `/sede/*` (403
+  correcto tras reiniciarla): estado inconsistente de Turbopack en esa
+  instancia, no reproducible tras reiniciar; sin causa raiz confirmada.
+- **`.dev.vars` no estaba en `.gitignore`:** habria quedado como candidato a
+  commit con `DATABASE_URL` y la service-role key. Agregado.
+
+### Decisiones tomadas sin respaldo explicito en los backlogs
+
+1. Se arreglo `src/lib/db/client.ts` y el test de concurrencia (fuera del texto
+   literal de la tarea) por ser un bug de produccion y uno de higiene de BD
+   descubiertos con la evidencia de esta sesion, tal como pedia "arreglalo si es
+   un bug de codigo".
+2. La corrida "por defecto" de Playwright no fue posible tal cual por el puerto
+   3000 ocupado por otro proyecto (ver arriba); se uso `E2E_BASE_URL`.
+3. `.dev.vars` se dejo en disco (ignorado por git) para poder repetir la
+   verificacion en workerd; wrangler/workerd/esbuild de este repo estan
+   apagados.
+4. Se borro a mano el residuo E2E previo a la sesion (por nombre/ID, con el
+   propio helper) para poder fijar el baseline pedido.
+
 ## 2026-09-18 — Saldo de deuda tecnica abierta de F2 (seed, round-trips, a11y, anular venta)
 
 Sesion dedicada a cerrar 4 deudas que quedaron documentadas al cierre de F2.
