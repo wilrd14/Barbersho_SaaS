@@ -32,6 +32,8 @@
  */
 
 import { z } from "zod";
+
+import { zUuid } from "@/lib/validation/id";
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
@@ -265,16 +267,16 @@ const tipSchema = z.discriminatedUnion("kind", [
 ]);
 
 const saleLineSchema = z.object({
-  serviceId: z.string().uuid(),
-  barberId: z.string().uuid(),
+  serviceId: zUuid,
+  barberId: zUuid,
   quantity: z.number().int().min(1).max(20),
 });
 
 const createSaleSchema = z.object({
-  locationId: z.string().uuid(),
-  idempotencyKey: z.string().uuid(),
-  appointmentId: z.string().uuid().optional(),
-  existingClientId: z.string().uuid().optional(),
+  locationId: zUuid,
+  idempotencyKey: zUuid,
+  appointmentId: zUuid.optional(),
+  existingClientId: zUuid.optional(),
   newClient: z
     .object({
       fullName: z.string().trim().min(2, "El nombre es obligatorio."),
@@ -517,7 +519,7 @@ export async function createSaleAction(input: unknown): Promise<ActionResult<Cre
           totalCents: totals.totalCents,
           primaryBarberId: totals.primaryBarberId,
         },
-      });
+      }, tx);
 
       return {
         saleId,
@@ -547,8 +549,8 @@ export async function createSaleAction(input: unknown): Promise<ActionResult<Cre
 // ---------------------------------------------------------------------------
 
 const voidSaleSchema = z.object({
-  locationId: z.string().uuid(),
-  saleId: z.string().uuid(),
+  locationId: zUuid,
+  saleId: zUuid,
   reason: z.string().trim().min(1, "Anular una venta exige un motivo."),
 });
 
@@ -609,7 +611,7 @@ export async function voidSaleAction(input: unknown): Promise<ActionResult<{ sal
         entityId: sale.id,
         before: { status: sale.status },
         after: { status: "refunded", reason: parsed.data.reason },
-      });
+      }, tx);
 
       return sale.id;
     });

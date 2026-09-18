@@ -3,6 +3,8 @@
 import { and, count, eq, gt, lt, or } from "drizzle-orm";
 import { z } from "zod";
 
+import { zUuid } from "@/lib/validation/id";
+
 import { db } from "@/lib/db/client";
 import { appointments, chains, clients, locations } from "@/lib/db/schema";
 import { writeAuditLog } from "@/lib/auth/audit";
@@ -48,7 +50,7 @@ async function resolveChainIdBySlug(slug: string): Promise<string | null> {
 // Lecturas (llamadas desde el wizard cliente a medida que avanza de paso)
 // ---------------------------------------------------------------------------
 
-const catalogSchema = z.object({ locationId: z.string().uuid() });
+const catalogSchema = z.object({ locationId: zUuid });
 
 export async function getLocationCatalogAction(
   input: unknown,
@@ -69,9 +71,9 @@ export async function getLocationBarbersAction(
 }
 
 const availabilitySchema = z.object({
-  locationId: z.string().uuid(),
-  serviceId: z.string().uuid(),
-  barberId: z.string().uuid().optional(),
+  locationId: zUuid,
+  serviceId: zUuid,
+  barberId: zUuid.optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 
@@ -168,9 +170,9 @@ export async function lookupClientHistoryAction(
 
 const createBookingSchema = z.object({
   chainSlug: z.string().trim().min(1),
-  locationId: z.string().uuid(),
-  serviceId: z.string().uuid(),
-  barberId: z.string().uuid(),
+  locationId: zUuid,
+  serviceId: zUuid,
+  barberId: zUuid,
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   slotStartMinutes: z.number().int().min(0).max(24 * 60 - 1),
   fullName: z.string().trim().min(2, "El nombre es obligatorio."),
@@ -323,7 +325,7 @@ export async function createPublicBookingAction(
         entity: "appointments",
         entityId: created!.id,
         after: { clientId, barberId: data.barberId, serviceId: data.serviceId, startsAt, endsAt },
-      });
+      }, tx);
 
       return {
         appointmentId: created!.id,

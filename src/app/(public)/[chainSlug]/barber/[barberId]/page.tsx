@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { z } from "zod";
+
+import { zUuid } from "@/lib/validation/id";
 
 import { buttonVariants } from "@/components/ui/button";
 import { getBarberPublicProfile, getChainBySlug } from "@/lib/public/directory";
@@ -9,7 +10,7 @@ interface PageProps {
   params: Promise<{ chainSlug: string; barberId: string }>;
 }
 
-const barberIdSchema = z.string().uuid();
+const barberIdSchema = zUuid;
 
 /**
  * F2-11 · Perfil publico del barbero (D-F2-4: `/[chainSlug]/barber/[barberId]`,

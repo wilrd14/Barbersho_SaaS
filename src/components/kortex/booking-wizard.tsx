@@ -4,6 +4,8 @@ import * as React from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { z } from "zod"
 
+import { zUuid } from "@/lib/validation/id"
+
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { FormField } from "@/components/ui/field"
@@ -49,13 +51,13 @@ type WizardProps =
 
 const searchParamsSchema = z.object({
   sede: z.string().trim().min(1).optional(),
-  servicio: z.string().uuid().optional(),
+  servicio: zUuid.optional(),
   fecha: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional(),
   hora: z.coerce.number().int().min(0).max(24 * 60 - 1).optional(),
-  barbero: z.string().uuid().optional(),
+  barbero: zUuid.optional(),
 })
 
 type WizardParams = z.infer<typeof searchParamsSchema>

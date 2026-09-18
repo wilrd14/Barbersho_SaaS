@@ -9,6 +9,8 @@
  */
 
 import { z } from "zod";
+
+import { zUuid } from "@/lib/validation/id";
 import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
@@ -109,7 +111,7 @@ export async function loadCashRegisterState(locationId: string): Promise<CashReg
 // ---------------------------------------------------------------------------
 
 const openCashSessionSchema = z.object({
-  locationId: z.string().uuid(),
+  locationId: zUuid,
   openingAmountCents: z.number().int().min(0),
 });
 
@@ -146,7 +148,7 @@ export async function openCashSessionAction(
         entity: "cash_sessions",
         entityId: created!.id,
         after: { openingAmountCents: parsed.data.openingAmountCents },
-      });
+      }, tx);
 
       return created!.id;
     });
@@ -165,8 +167,8 @@ export async function openCashSessionAction(
 // ---------------------------------------------------------------------------
 
 const closeCashSessionSchema = z.object({
-  locationId: z.string().uuid(),
-  cashSessionId: z.string().uuid(),
+  locationId: zUuid,
+  cashSessionId: zUuid,
   countedCashCents: z.number().int().min(0),
   notes: z.string().trim().max(500).optional(),
 });
@@ -272,7 +274,7 @@ export async function closeCashSessionAction(
           transferTotalCents,
           notes: parsed.data.notes ?? null,
         },
-      });
+      }, tx);
 
       return { expectedCashCents, countedCashCents: parsed.data.countedCashCents, differenceCents, cardTotalCents, transferTotalCents };
     });

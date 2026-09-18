@@ -9,6 +9,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --require ./scripts/stub-server-only.cjs src/lib/db/migrate.ts",
     "db:seed": "tsx --require ./scripts/stub-server-only.cjs src/lib/db/seed.ts",
@@ -35,6 +36,7 @@
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.6",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^24.13.5",
     "@types/react": "^19",

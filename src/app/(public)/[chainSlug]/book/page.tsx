@@ -2,6 +2,8 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { z } from "zod";
 
+import { zUuid } from "@/lib/validation/id";
+
 import { BookingWizard } from "@/components/kortex/booking-wizard";
 import { getActiveLocationsForChain, getBarberPublicProfile, getChainBySlug } from "@/lib/public/directory";
 
@@ -12,7 +14,7 @@ interface PageProps {
 
 const entrySearchParamsSchema = z.object({
   sede: z.string().trim().min(1).optional(),
-  barbero: z.string().uuid().optional(),
+  barbero: zUuid.optional(),
 });
 
 /**

@@ -3,6 +3,8 @@
 import { desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
+import { zUuid } from "@/lib/validation/id";
+
 import { db } from "@/lib/db/client";
 import { appointments, chains, clients, locations, services, users } from "@/lib/db/schema";
 import { requireClientScope } from "@/lib/auth/guards";
@@ -87,7 +89,7 @@ export async function getMyAppointments(): Promise<ClientAppointmentRow[]> {
     }));
 }
 
-const cancelSchema = z.object({ appointmentId: z.string().uuid() });
+const cancelSchema = z.object({ appointmentId: zUuid });
 
 export async function cancelMyAppointmentAction(
   input: unknown,
@@ -157,7 +159,7 @@ export async function cancelMyAppointmentAction(
         entityId: current.id,
         before: { status: current.status },
         after: { status: "cancelled" },
-      });
+      }, tx);
 
       return { status: "cancelled" };
     });

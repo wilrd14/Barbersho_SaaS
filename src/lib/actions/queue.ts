@@ -33,6 +33,8 @@
  */
 
 import { z } from "zod";
+
+import { zUuid } from "@/lib/validation/id";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
@@ -364,10 +366,10 @@ function assertTransition(from: QueueTicketStatus, to: QueueTicketStatus) {
 
 const joinQueueSchema = z
   .object({
-    locationId: z.string().uuid(),
-    serviceId: z.string().uuid(),
-    preferredBarberId: z.string().uuid().optional(),
-    clientId: z.string().uuid().optional(),
+    locationId: zUuid,
+    serviceId: zUuid,
+    preferredBarberId: zUuid.optional(),
+    clientId: zUuid.optional(),
     clientNameTemp: z.string().trim().min(1).max(120).optional(),
     phone: z.string().trim().min(6).max(20).optional(),
   })
@@ -434,7 +436,7 @@ export async function joinQueue(
 // callTicket — F2-16
 // ---------------------------------------------------------------------------
 
-const ticketIdSchema = z.object({ ticketId: z.string().uuid() });
+const ticketIdSchema = z.object({ ticketId: zUuid });
 
 export async function callTicket(input: unknown): Promise<ActionResult<{ ticketId: string }>> {
   const parsed = ticketIdSchema.safeParse(input);
@@ -466,8 +468,8 @@ export async function callTicket(input: unknown): Promise<ActionResult<{ ticketI
 // ---------------------------------------------------------------------------
 
 const startServingSchema = z.object({
-  ticketId: z.string().uuid(),
-  barberId: z.string().uuid().optional(),
+  ticketId: zUuid,
+  barberId: zUuid.optional(),
 });
 
 export async function startServing(
@@ -541,7 +543,7 @@ export async function startServing(
         entity: "appointments",
         entityId: appointmentId,
         after: { ticketId: ticket.id, barberId, startsAt, endsAt },
-      });
+      }, tx);
 
       await recalcQueueState(tx, locationId, new Date());
 
@@ -586,7 +588,7 @@ export async function markDone(input: unknown): Promise<ActionResult<{ ticketId:
 // ---------------------------------------------------------------------------
 
 const markLeftSchema = z.object({
-  ticketId: z.string().uuid(),
+  ticketId: zUuid,
   reason: z.string().trim().max(280).optional(),
 });
 
@@ -612,7 +614,7 @@ export async function markLeft(input: unknown): Promise<ActionResult<{ ticketId:
         entityId: ticket.id,
         before,
         after: { status: "left", reason: parsed.data.reason ?? null },
-      });
+      }, tx);
 
       await recalcQueueState(tx, locationId, new Date());
       return ticket.id;
@@ -629,8 +631,8 @@ export async function markLeft(input: unknown): Promise<ActionResult<{ ticketId:
 // ---------------------------------------------------------------------------
 
 const reassignBarberSchema = z.object({
-  ticketId: z.string().uuid(),
-  barberId: z.string().uuid(),
+  ticketId: zUuid,
+  barberId: zUuid,
 });
 
 export async function reassignBarber(
@@ -663,7 +665,7 @@ export async function reassignBarber(
         entityId: ticket.id,
         before,
         after: { preferredBarberId: parsed.data.barberId },
-      });
+      }, tx);
 
       await recalcQueueState(tx, locationId, new Date());
       return ticket.id;
@@ -768,7 +770,7 @@ export async function loadQueueSnapshot(locationId: string): Promise<QueueSnapsh
   };
 }
 
-const locationIdSchema = z.object({ locationId: z.string().uuid() });
+const locationIdSchema = z.object({ locationId: zUuid });
 
 /**
  * Wrapper con guard, pensado para llamarse desde el cliente (carga inicial

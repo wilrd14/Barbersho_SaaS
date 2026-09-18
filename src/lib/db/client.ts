@@ -39,7 +39,21 @@ function getConnectionString() {
 
 export function getDb() {
   if (!_db) {
-    _client = postgres(getConnectionString(), { prepare: false, max: 1 });
+    _client = postgres(getConnectionString(), {
+      prepare: false,
+      max: 1,
+      // Instrumentacion temporal de diagnostico (F2-25): cuenta round-trips
+      // reales a la DB cuando DEBUG_DB_ROUNDTRIPS=1. No se activa en
+      // produccion ni en tests normales; solo la usa
+      // scripts/measure-availability-roundtrips.ts.
+      ...(process.env.DEBUG_DB_ROUNDTRIPS === "1"
+        ? {
+            debug: (_conn: unknown, query: string) => {
+              console.log(`[db round-trip] ${query.slice(0, 90).replace(/\s+/g, " ")}`);
+            },
+          }
+        : {}),
+    });
     _db = drizzle(_client, { schema });
   }
   return _db;

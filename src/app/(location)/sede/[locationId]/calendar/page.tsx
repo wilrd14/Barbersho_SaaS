@@ -2,6 +2,8 @@ import Link from "next/link"
 import { eq } from "drizzle-orm"
 import { z } from "zod"
 
+import { zUuid } from "@/lib/validation/id"
+
 import { requireLocationScope } from "@/lib/auth/guards"
 import { db } from "@/lib/db/client"
 import { locations } from "@/lib/db/schema"
@@ -15,7 +17,7 @@ import { Badge, type BadgeStatus } from "@/components/ui/badge"
 import { EmptyState } from "@/components/ui/empty-state"
 
 const searchParamsSchema = z.object({
-  barberId: z.string().uuid().optional(),
+  barberId: zUuid.optional(),
   week: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)

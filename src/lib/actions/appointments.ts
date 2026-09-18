@@ -3,6 +3,8 @@
 import { and, eq, gt, ilike, lt, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 
+import { zUuid } from "@/lib/validation/id";
+
 import { db } from "@/lib/db/client";
 import { appointments, clients } from "@/lib/db/schema";
 import { requireLocationScope, type LocationScopeContext } from "@/lib/auth/guards";
@@ -54,8 +56,8 @@ function assertCanActOnBarber(scope: LocationScopeContext, barberId: string) {
 // ---------------------------------------------------------------------------
 
 const transitionSchema = z.object({
-  locationId: z.string().uuid(),
-  appointmentId: z.string().uuid(),
+  locationId: zUuid,
+  appointmentId: zUuid,
   action: z.enum(["confirm", "start", "complete", "no_show", "cancel"]),
   cancellationReason: z.string().trim().min(1).max(500).optional(),
 });
@@ -129,7 +131,7 @@ export async function transitionAppointmentAction(
         entityId: appointmentId,
         before: { status: current.status },
         after: { status: nextStatus, cancellationReason: cancellationReason ?? null },
-      });
+      }, tx);
 
       return { status: nextStatus };
     });
@@ -146,13 +148,13 @@ export async function transitionAppointmentAction(
 // ---------------------------------------------------------------------------
 
 const createAppointmentSchema = z.object({
-  locationId: z.string().uuid(),
-  serviceId: z.string().uuid(),
-  barberId: z.string().uuid(),
+  locationId: zUuid,
+  serviceId: zUuid,
+  barberId: zUuid,
   startsAt: z.string().datetime(),
   source: z.enum(["admin", "phone"]).default("admin"),
   notes: z.string().trim().max(500).optional(),
-  existingClientId: z.string().uuid().optional(),
+  existingClientId: zUuid.optional(),
   newClient: z
     .object({
       fullName: z.string().trim().min(2, "El nombre es obligatorio."),
@@ -270,7 +272,7 @@ export async function createAppointmentAction(
           endsAt,
           source: data.source,
         },
-      });
+      }, tx);
 
       return created!.id;
     });
@@ -294,10 +296,10 @@ export async function createAppointmentAction(
 // ---------------------------------------------------------------------------
 
 const rescheduleSchema = z.object({
-  locationId: z.string().uuid(),
-  appointmentId: z.string().uuid(),
+  locationId: zUuid,
+  appointmentId: zUuid,
   newStartsAt: z.string().datetime(),
-  newBarberId: z.string().uuid().optional(),
+  newBarberId: zUuid.optional(),
 });
 
 export async function rescheduleAppointmentAction(
@@ -385,7 +387,7 @@ export async function rescheduleAppointmentAction(
         entityId: appointmentId,
         before: { startsAt: current.startsAt, endsAt: current.endsAt, barberId: current.barberId },
         after: { startsAt, endsAt, barberId: targetBarberId },
-      });
+      }, tx);
 
       return { startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), barberId: targetBarberId };
     });
@@ -407,7 +409,7 @@ export async function rescheduleAppointmentAction(
 // ---------------------------------------------------------------------------
 
 const searchClientsSchema = z.object({
-  locationId: z.string().uuid(),
+  locationId: zUuid,
   query: z.string().trim().min(2).max(120),
 });
 

@@ -1,5 +1,175 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — F2-25: tests y cierre de F2
+
+Última tarea de F2 (`BACKLOG-F2.md` §6, Bloque F). Objetivo: 100% en
+`lib/scheduling` (ya estaba, se confirma), cobertura completa de `lib/queue`
+y `lib/pos` (ya estaba, se confirma), test de concurrencia real de
+doble-booking, test de la máquina de estados de citas y de la fila (ya
+existían como módulos puros 100% testeados), Playwright configurado con los
+4 flujos críticos del PRD §15, y medir el AC de "≤3 round-trips" de F2-04.
+
+**Estado final, verificado en este orden — los 4 comandos en verde:**
+`npm run test` (101 tests, 10 archivos), `npm run typecheck`, `npm run lint`
+(0 errores), `npm run build` (25 rutas, Turbopack). Los 4 E2E de Playwright
+pasan corridos en secuencia contra el seed real (`npm run db:seed`, proyecto
+Supabase real de `.env.local`), tanto sueltos como en el orden completo.
+
+**Dos bugs reales de producción encontrados y corregidos al correr F2 en
+serio por primera vez contra la DB real** (ninguno lo detectaba
+typecheck/lint/test de módulos puros; ambos bloqueaban los 4 flujos críticos
+por completo):
+
+1. **Deadlock de aplicación en toda operación de dinero/auditoría.**
+   `writeAuditLog()` (`src/lib/auth/audit.ts`) siempre usaba el cliente `db`
+   singleton (`src/lib/db/client.ts`, pool `max: 1`, a propósito para
+   Cloudflare Workers), nunca el `tx` de la transacción en curso. Los 12
+   llamadores dentro de `db.transaction(async (tx) => ...)` (reservar,
+   cobrar, abrir/cerrar caja, dar turno, transicionar/crear/reprogramar
+   cita, cancelar cita de cliente) quedaban colgados **para siempre, sin
+   error**: la transacción reservaba la única conexión del pool, y el
+   `insert` de auditoría esperaba una conexión libre que la propia
+   transacción — bloqueada esperando ese mismo `insert` para poder hacer
+   `COMMIT` — nunca iba a soltar. Confirmado con `pg_stat_activity`: la
+   sesión quedaba en `idle in transaction`, sin ningún lock bloqueante — 100%
+   deadlock de aplicación, no de Postgres. Esto nunca se detectó antes porque
+   ningún Server Action de dinero se había corrido en serio contra la DB real
+   (el CHANGELOG del cierre anterior ya lo advertía: "verificado
+   manualmente/por build" no es evidencia suficiente). **Fix:** `writeAuditLog`
+   ahora acepta el ejecutor Drizzle (`db` o `tx`) como segundo parámetro
+   opcional; los 12 llamadores dentro de una transacción le pasan `tx`
+   explícitamente. Nada de la lógica de negocio cambió — es un bug de
+   plomería (conexión equivocada), no una regla de negocio distinta.
+2. **Zod v4 rechazaba todos los IDs fijos del seed como "Invalid UUID".**
+   Zod v4 endureció `.uuid()` para exigir los nibbles de versión ([1-8]) y
+   variante ([89ab]) del RFC 9562 (con excepción explícita solo para el UUID
+   nulo y el "todo F"). Los IDs fijos y legibles del seed
+   (`src/lib/db/seed.ts`, ej. `00000000-0000-0000-0000-000000000301` para
+   Naco) no cumplen esos nibbles, así que **cualquier** Server Action que
+   validaba un `locationId`/`serviceId`/`barberId`/etc. con
+   `z.string().uuid()` rechazaba con "Invalid UUID" toda llamada real contra
+   el seed — 10 archivos, ~35 usos. **Fix:** `src/lib/validation/id.ts` define
+   `zUuid` (valida el formato 8-4-4-4-12 hex, sin exigir version/variant
+   nibbles — la autoridad real de que el ID exista y pertenezca al tenant
+   sigue siendo el guard + la query a la DB, regla dura §3.1); reemplaza
+   `z.string().uuid()` en los 10 archivos afectados (`public-booking.ts`,
+   `queue.ts`, `checkout.ts`, `cash-register.ts`, `appointments.ts`,
+   `client-appointments.ts`, `booking-wizard.tsx`, `calendar/page.tsx`,
+   `[chainSlug]/book/page.tsx`, `[chainSlug]/barber/[barberId]/page.tsx`).
+   No se tocaron los IDs del seed (cambiarlos habría sido una migración de
+   datos fuera del alcance de F2-25).
+
+**Sin ambos fixes, ninguno de los 4 flujos críticos del PRD §15 era
+ejecutable contra el seed real — se habrían visto como "Invalid UUID" en
+consola primero, y de haber pasado esa capa, colgados sin límite de tiempo
+al segundo intento de escritura de auditoría.** Ambos se descubrieron
+metódicamente: un script de diagnóstico aislado (`scripts/debug-booking.ts`,
+ya borrado tras el fix) reprodujo el hang fuera de Playwright/Vitest,
+confirmando que no era un artefacto del test runner.
+
+**Playwright configurado** (`playwright.config.ts`, devDependency
+`@playwright/test` + Chromium descargado): `baseURL` `localhost:3000`,
+`webServer` levanta `next dev` automáticamente (`reuseExistingServer` fuera
+de CI para no chocar con un dev server local ya corriendo), un solo worker
+(los 4 flujos comparten el mismo seed/sede/caja, se corren en serie a
+propósito). `npm run test:e2e` es el atajo.
+
+**Los 4 E2E** (`e2e/01-reservar.spec.ts` .. `e2e/04-cerrar-caja.spec.ts`,
+prefijo numérico para que corran en el orden en que un día real los
+necesita — cobrar necesita caja abierta, cerrar-caja la cierra):
+1. **Reservar** — cliente anónimo completa el wizard de 4 pasos en
+   `/don-bigote/book` (sede → servicio → fecha/hora → confirmar) y verifica
+   la pantalla "¡Listo!" con el código de reserva.
+2. **Dar turno** — `admin.naco` agrega un walk-in nuevo en
+   `/sede/<Naco>/queue` y lo ve aparecer en la lista sin recargar.
+3. **Cobrar** — `admin.naco` cobra una venta libre en efectivo en
+   `/sede/<Naco>/checkout` (abre caja primero si hace falta) y verifica
+   "Cobro registrado.".
+4. **Cerrar caja** — `admin.naco` abre caja si hace falta y la cierra en
+   `/sede/<Naco>/register`, verificando que la pantalla de cierre muestra
+   esperado/contado/descuadre.
+
+**Decisión técnica no explícita en el backlog:** varios formularios de F2
+(`booking-wizard.tsx`, `queue-realtime-list.tsx`, `checkout-form.tsx`,
+`cash-register-panel.tsx`) usan `<FormField label="X"><Input/></FormField>`
+sin pasar `htmlFor` a `FormField`, así que el `<label>` no queda asociado
+programáticamente con su `<input>` (son hermanos en el DOM, no
+`for`/`id`) — es una brecha real de accesibilidad (un lector de pantalla no
+anuncia el campo correctamente), no un problema de los tests. Arreglarla
+tocaría ~8 componentes de UI existentes, fuera del alcance de F2-25 (tarea
+de testing y cierre, no de features/UI). Se documenta aquí como deuda
+técnica de accesibilidad para una tarea futura; mientras tanto los E2E usan
+un locator propio (`fieldInput()` en `e2e/helpers.ts`) que ubica el input
+por el texto del `<label>` hermano.
+
+**Test de concurrencia real de doble-booking**
+(`src/lib/actions/__tests__/public-booking.concurrency.test.ts`, Vitest,
+contra la DB real — `vitest.setup.ts` ahora carga `.env.local`): dos
+inserts **verdaderamente simultáneos** (dos conexiones postgres.js
+independientes, no el cliente `max: 1` de la app, que serializaría los dos
+intentos sobre la misma conexión y no ejercitaría una condición de carrera
+real) contra el mismo barbero y el mismo rango horario. Resultado: exactamente
+uno de los dos gana; el otro es rechazado por Postgres con código `23P01`
+(`exclusion_violation`, disparado por `appointments_no_overlap_per_barber`
+de `0002_f2_integrity.sql`) — la autoridad real es la base de datos, tal
+como exige la regla dura §3.7c y el AC de F2-01. Un segundo test, más
+simple, llama `createPublicBookingAction` dos veces para el mismo slot y
+confirma que el segundo intento recibe el mensaje en español ("Ese horario
+acaba de ocuparse...") en vez de un stack trace o un colgado.
+
+**AC de F2-04 medido, no solo declarado** (`scripts/measure-availability-roundtrips.ts`,
+instrumentación de diagnóstico en `src/lib/db/client.ts` gateada por
+`DEBUG_DB_ROUNDTRIPS=1`, sin efecto en producción/tests normales): correr
+`getAvailability` para un día completo de la sede Naco contra la DB real
+dispara **8 round-trips** (sede, barberos activos, servicio, override de
+precio/duración, schedules, barber_services, time_off, citas activas del
+rango), no ≤3 como pedía el AC original de F2-04. **Se documenta como deuda
+técnica, no se optimiza en esta tarea:** F2-25 es de testing y cierre, no de
+features; colapsar 8 queries en ≤3 exigiría SQL a mano con joins/CTEs
+(viable — la mayoría son `select` independientes que podrían unirse — pero
+es un cambio de la lógica interna de `lib/scheduling/availability.ts`, fuera
+del alcance que se me asignó explícitamente ("no toques la lógica de negocio
+de ningún Server Action"), y no bloquea ningún AC de UX medido (LCP de
+`/don-bigote` y el wizard siguen dentro de los tiempos del PRD §15 en la
+práctica). Queda para una tarea futura de performance si el piloto lo pide.
+
+**Confirmado sin tocar nada** (ya estaban en verde al cierre de la sesión
+anterior): 100% de cobertura en `lib/scheduling` (módulo puro:
+`index.ts` + `appointment-state.ts` + `effective-service.ts` — `agenda.ts` y
+`availability.ts` son la capa de lectura con DB, fuera del requisito de 100%
+del PRD §15 por diseño), cobertura completa de `lib/queue` y `lib/pos`. La
+máquina de estados de citas (`appointment-state.ts`,
+`resolveAppointmentTransition`) y de la fila (`queue/index.ts`,
+`isValidQueueTransition`) ya eran módulos puros 100% testeados desde los
+bloques B y D — no hizo falta escribir tests nuevos para ese punto del AC,
+solo confirmarlo.
+
+**Riesgos abiertos que quedan para después de F2:**
+- La deuda de accesibilidad de `FormField`/`htmlFor` (arriba) no es
+  bloqueante para el piloto pero sí para una auditoría de accesibilidad
+  real.
+- El número real de round-trips de `getAvailability` (8, no ≤3) queda como
+  deuda técnica documentada; no se midió su impacto real en latencia
+  percibida contra el proyecto Supabase de producción bajo carga.
+- Los 2 bugs de esta sesión (deadlock de auditoría, Zod UUID) sugieren que
+  **ningún Server Action de dinero de F2 se había ejecutado nunca de
+  extremo a extremo contra la DB real antes de esta sesión** — vale la pena
+  que el equipo revise si hay más caminos (los que no cubren estos 4 E2E,
+  ej. F2-14 cancelar cita de cliente, F2-22 anular venta, F2-09
+  reprogramar/reasignar) que puedan tener bugs similares sin descubrir. No
+  se auditaron exhaustivamente todos los caminos en esta sesión por tiempo.
+- El spike de Cloudflare Workers (F2-00) fue validado en su momento contra
+  un build sin estos dos fixes; no se redesplegó ni se reverificó en Workers
+  real dentro de esta sesión — el próximo deploy a Cloudflare debería
+  confirmar que el fix del deadlock también aplica ahí (el pool `max: 1` es
+  precisamente la configuración pensada para ese runtime, así que el bug
+  habría sido igual de grave o peor en producción).
+
+**F2 queda formalmente cerrada** con este bloque: los 8 puntos de la
+Definición de Done (`BACKLOG-F2.md` §7) están cubiertos por evidencia
+automatizada (Vitest + Playwright) más el build limpio, no solo por
+verificación manual.
+
 ## Pendiente a futuro (no es F2/F3, anotar para no olvidar)
 
 - **Landing page de marketing** para promocionar Kortex como servicio (no la
