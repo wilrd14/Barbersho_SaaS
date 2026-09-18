@@ -205,8 +205,8 @@ async function getAvailableBarbers(
       and(
         eq(timeOff.status, "approved"),
         inArray(timeOff.userId, [...scheduledNow]),
-        sql`${timeOff.startsAt} <= ${now}`,
-        sql`${timeOff.endsAt} >= ${now}`,
+        sql`${timeOff.startsAt} <= ${now.toISOString()}`,
+        sql`${timeOff.endsAt} >= ${now.toISOString()}`,
       ),
     );
   const onTimeOff = new Set(timeOffRows.map((r) => r.userId));
