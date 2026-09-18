@@ -1,5 +1,40 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — Cierre de sesión: F2 realmente cerrado, backlog de F3 listo
+
+**Estado al cerrar hoy:** F2 queda cerrado de verdad — los 6 E2E de Playwright
+en verde (los 4 originales de F2-25 + los 2 de la auditoría de rutas sin
+cubrir), 103 tests de Vitest, typecheck/lint/build en verde, todo commiteado
+en `main` hasta `8032dc3`. `BACKLOG-F3.md` ya está escrito y listo para
+implementar, pero **la implementación de F3 todavía NO empezó** — es lo
+primero que toca en la próxima sesión.
+
+**Resumen de lo hecho hoy** (ver entradas detalladas más abajo en este mismo
+archivo para cada una):
+1. F2-25: Playwright configurado, 4 E2E críticos, test de concurrencia real
+   de doble-booking, medición honesta del AC de round-trips (8, no ≤3).
+   Encontró y arregló 2 bugs graves (deadlock de `writeAuditLog` dentro de
+   transacciones, y Zod v4 rechazando los UUID del seed).
+2. Auditoría de los 3 caminos que F2-25 no cubrió (cancelar cita, anular
+   venta, reprogramar/reasignar): los 2 primeros ya estaban sanos, el
+   tercero tenía el mismo deadlock de clase (`resolveEffectiveServiceFor`
+   sin `tx`) — corregido.
+3. Un tercer bug real, de clase distinta, encontrado al correr la suite
+   completa: `time_off` crasheaba por interpolar un `Date` crudo en un
+   template `sql` de Drizzle — corregido, más una fragilidad de re-seed
+   documentada (no resuelta) por el `EXCLUDE` constraint no diferido.
+4. `BACKLOG-F3.md`: motor de comisiones ("El Corte"), dashboard consolidado
+   ("Vista Cadena"/"Tabla de Posiciones"), suscripción/billing sin pasarela
+   real. Aclara que **"F3 = MVP vendible" no es cierto tal como está el
+   repo** — faltan las pantallas CRUD de F1 (sedes/equipo/servicios, hoy
+   placeholders) y el email transaccional, movidos a F4.
+
+**Primer paso de la próxima sesión:** implementar `BACKLOG-F3.md` con el
+mismo esquema de equipo (developer-builder por bloques, verificando
+`npm run build` completo antes de dar cada bloque por cerrado — no solo
+typecheck/lint/test, que ya demostraron no ser suficiente 3 veces esta
+semana).
+
 ## 2026-09-18 — Tercer bug real: crash pre-existente en La Fila (time_off)
 
 Al correr la suite Playwright completa para cerrar la auditoria de arriba,
