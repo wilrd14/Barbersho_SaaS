@@ -1,5 +1,234 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — Saldo de deuda tecnica abierta de F2 (seed, round-trips, a11y, anular venta)
+
+Sesion dedicada a cerrar 4 deudas que quedaron documentadas al cierre de F2.
+Un commit por tarea, sobre `main`. **Estado final verificado, en este orden:**
+`npm run typecheck` (0 errores), `npm run lint` (0 errores; 1 warning ajeno en
+`coverage/block-navigation.js`, archivo generado), `npm run test` (11 archivos,
+**104 tests** — 1 nuevo vs. los 103 anteriores), `npm run build` completo
+(25 rutas, Turbopack) y la suite Playwright entera (`npx playwright test`):
+**7 de 7 specs en verde** (los 6 anteriores + el nuevo `07-anular-venta`).
+Sin `npm run deploy`, sin tocar `wrangler.jsonc`, credenciales ni `.env.local`.
+
+Commits de esta sesion (en orden): `fcb257a` (seed), `51d7c0f` (round-trips),
+`a816328` (a11y), `adb67b9` (anular venta), mas el commit de este CHANGELOG.
+
+### Tarea 1 — Fragilidad del re-seed (`src/lib/db/seed.ts`)
+
+- **Problema:** `npm run db:seed` fallaba en cualquier momento del dia distinto
+  al del ultimo seed con `conflicting key value violates exclusion constraint
+  "appointments_no_overlap_per_barber"` (codigo `23P01`). Esto ya nos habia
+  obligado a limpiar filas a mano en Supabase.
+- **Causa raiz:** las 8 citas de hoy de F2-24 (IDs fijos `...0801`-`...0808`) tienen
+  horas ancladas a `now`, y el seed las actualizaba una por una con
+  `onConflictDoUpdate`. El `EXCLUDE` de `0002_f2_integrity.sql` **no es
+  `DEFERRABLE`**, asi que Postgres lo evalua en cada UPDATE: al mover la cita
+  0802 a su nueva hora, esta se solapaba con la cita 0803 del mismo barbero que
+  todavia conservaba la hora vieja. Reproducido a proposito antes de tocar codigo:
+  desplazando las 8 filas -2 h (equivale a haber sembrado 2 h antes) y
+  corriendo el seed viejo, fallo exactamente en la fila `...0802` (barbero
+  `...0101`). Nota: un desplazamiento de +7 h NO reproducia el choque (ningun
+  solapamiento transitorio), por eso el bug era intermitente y dependia de la hora.
+- **Solucion:** `seedTodayAppointments` ahora hace, dentro de una sola
+  `db.transaction(async (tx) => ...)`, un `DELETE` de los 8 IDs fijos
+  (`inArray(appointments.id, APPOINTMENT_TODAY_IDS)`) y luego los inserta de
+  nuevo (con `onConflictDoNothing` solo como red de idempotencia por id). Todo
+  dentro de la transaccion usa `tx` (regla del pool `max: 1`). Sin cambios de
+  schema. Solo toca los IDs fijos del seed, nunca citas reales;
+  `sales.appointment_id` es `on delete set null`, y ninguna venta del seed
+  referencia esas citas. Como los inserts pasaron a `tx.insert(...)`, el test
+  estatico de idempotencia (`seed.test.ts`, que busca `db.insert`) no los ve;
+  se agrego un test que verifica que `seedTodayAppointments` usa
+  `db.transaction` + `tx.delete(appointments)` y ya no `.onConflictDoUpdate(`.
+- **Archivos:** `src/lib/db/seed.ts`, `src/lib/db/__tests__/seed.test.ts`.
+- **Verificacion contra el Supabase real (`.env.local`):** seed con la base ya
+  rota por el escenario -2 h -> termina sin error; se volvio a desplazar -2 h y
+  re-sembrar -> OK; desplazar +7 h y re-sembrar -> OK; 2 corridas mas
+  seguidas -> OK. Las 8 citas quedan con las horas correctas (0801..0808, 3
+  barberos, sin solapamiento). `count(*)` estable entre corridas:
+  appointments 12, walk_in_queue 5, cash_sessions 5, sales 9, sale_items 9,
+  schedules 18 (los numeros incluian residuos de E2E previos, ver Limpieza;
+  lo relevante es que **no cambian entre corridas**, o sea no duplica).
+- **Deuda que queda:** el seed no es atomico en su conjunto (cada tabla se
+  siembra por separado); solo esta parte lo es. No hace falta hoy.
+
+### Tarea 2 — `getAvailability` de 8 a 3 round-trips (`src/lib/scheduling/availability.ts`)
+
+- **Problema:** el AC de F2-04 exigia <=3 round-trips a la DB para un dia
+  completo; F2-25 midio 8 y lo dejo como deuda.
+- **Medicion ANTES/DESPUES** (`scripts/measure-availability-roundtrips.ts` +
+  `DEBUG_DB_ROUNDTRIPS=1`, contra el Supabase real, sede Naco, un dia):
+  **ANTES: 8** (sede, barberos, servicio, override, schedules,
+  barber_services, time_off, citas). **DESPUES: 3.** (La linea de `pg_type`
+  que imprime el script al principio es la carga unica de OIDs de postgres.js
+  al abrir la conexion; no es de `getAvailability`, y estaba tambien antes.)
+- **Solucion (Drizzle tipado, sin SQL a mano, sin `Promise.all` que solo solapa):**
+  1. sede `LEFT JOIN` servicio `LEFT JOIN` override de precio/duracion de esa sede (1 fila).
+  2. `barber_locations` activos `INNER JOIN users` `LEFT JOIN schedules` (bloques
+     activos de esa sede) `LEFT JOIN barber_services` (duracion custom); una fila
+     por barbero x bloque. `barber_services` tiene indice unico (user, service),
+     asi que no multiplica filas.
+  3. `time_off` aprobado `UNION ALL` citas activas del rango, ambos filtrados
+     con un **subquery** de barberos activos de la sede (`inArray(col, subquery)`),
+     asi no hace falta conocer los ids antes. Las citas siguen siendo las del
+     barbero en cualquier sede (D-F2-5). Un literal `kind` distingue las filas.
+  Luego se reagrupa en memoria y se delega al motor puro sin cambios. Contrato
+  de `getAvailability` y de `resolveEffectiveServiceFor` intactos; el motor
+  puro `src/lib/scheduling/index.ts` no se toco.
+- **Verificacion de correccion:** un script temporal (ya borrado) comparo la
+  implementacion vieja (copia) contra la nueva en 62 casos (3 sedes x 5
+  servicios x 4 variantes de `barberId`: ninguno, barbero 1, barbero 3
+  multi-sede, id inexistente; mas servicio inexistente y sede inexistente),
+  rango de 7 dias: **62/62 identicos, 5,467 slots comparados**. Se repitio con
+  una fila `time_off` aprobada temporal (barbero 1, hoy +1h..+4h) para ejercitar
+  la rama de la UNION: tambien identicos (5,379 slots, o sea el time_off recorto
+  slots igual en ambas versiones); la fila se borro. Los 104 tests de Vitest y
+  los E2E `01-reservar` y `06-reprogramar-cita` siguen en verde.
+- **Archivos:** `src/lib/scheduling/availability.ts`,
+  `scripts/measure-availability-roundtrips.ts` (solo el comentario con el historial).
+- **Deuda que queda:** 3 es el objetivo del backlog; se podria bajar a 1-2 con
+  una sola consulta con CTEs, pero no aporta nada medible hoy. No se midio
+  latencia real bajo carga contra el Supabase de produccion. Nota de diseno: el
+  rango del dia usa limites en UTC (`T00:00:00Z`..`T23:59:59.999Z`), igual que
+  antes; el corte por zona horaria de la sede lo hace el motor puro.
+
+### Tarea 3 — Accesibilidad: labels sin `htmlFor`
+
+- **Problema:** `FormField` renderizaba `<label>` y control como hermanos sin
+  `for`/`id`; un lector de pantalla no anunciaba el campo y `getByLabel` de
+  Playwright no lo encontraba (por eso existia el locator artesanal
+  `fieldInput`). Afectaba booking-wizard, queue-realtime-list, checkout-form,
+  cash-register-panel, appointment-sheet y create-appointment-sheet.
+- **Causa raiz:** `FormField` tenia un prop `htmlFor` opcional que casi nadie
+  pasaba, y los controles hijos (`Input`) no tenian forma de conocer el id.
+- **Solucion, centralizada:** `FormField` (ahora `"use client"`) genera un id
+  con `useId` (o respeta el `htmlFor` explicito), lo pone en el `<label for>` y
+  lo publica por un contexto (`useFormFieldControl`). `Input` y el nuevo
+  `Textarea` (`src/components/ui/textarea.tsx`) lo consumen: heredan `id`,
+  `aria-describedby` (apunta al helper/error, que ahora tiene id) y
+  `aria-invalid` cuando hay `error`; lo que el llamador pase explicito gana.
+  Los ~60 usos de `<FormField label=..><Input/></FormField>` quedaron
+  arreglados **sin editarlos**. Unica edicion de componente: el `<textarea>`
+  crudo de `cash-register-panel.tsx` pasa a `Textarea` (un `<textarea>` crudo
+  no puede leer el contexto). `Select` y `Combobox` (base-ui) **ya** pasaban su
+  propio id como `htmlFor` al FormField y lo ponian en el Trigger / Input, asi
+  que no necesitaron cambio: se verifico (no se asumio) porque el E2E 06 ya
+  usa `getByLabel("Barbero")` sobre un Select y el 02 `getByRole("combobox",
+  { name: "Servicio" })`, y ambos pasan. Los formularios de auth
+  (`login-form`, etc.) usan `Label htmlFor` + `Input id` manuales; no dependen
+  del contexto y siguen igual.
+- **E2E:** `fieldInput` se elimino por completo de `e2e/helpers.ts` (ningun
+  control lo sigue necesitando); los 6 specs usan
+  `page.getByLabel("X", { exact: true })` (`exact` porque "Telefono" y
+  "Telefono (opcional)" coexisten).
+- **Archivos:** `src/components/ui/field.tsx`, `src/components/ui/input.tsx`,
+  `src/components/ui/textarea.tsx` (nuevo), `src/components/kortex/cash-register-panel.tsx`,
+  `e2e/helpers.ts`, `e2e/01..06-*.spec.ts`.
+- **Verificacion:** suite Playwright completa (6 specs en ese momento) en verde.
+- **Deuda que queda:** un `FormField` debe envolver UN solo control (con varios
+  compartirian id); esta documentado en el codigo. `Select`/`Combobox` no
+  enlazan el helper/error con `aria-describedby` (el id de mensaje existe pero
+  su trigger no lo referencia). No se hizo una auditoria de accesibilidad
+  completa (foco, contraste, lectores reales), solo la asociacion label-control.
+
+### Tarea 4 — UI para anular una venta (F2-22)
+
+- **Problema:** `voidSaleAction` existia y estaba probado (Vitest de
+  integracion) pero ninguna pantalla lo llamaba: un gerente no podia anular una
+  venta desde Kortex.
+- **Reglas respetadas (F2-22 / D-F2):** solo admin/superuser, solo si la caja de
+  esa venta sigue abierta, motivo obligatorio, `audit_log` `sale.refund` con
+  `before`/`after`. Todas las sigue imponiendo el servidor
+  (`voidSaleAction`, sin cambios); la UI no es autoridad de nada.
+- **Solucion:**
+  - `listOpenSessionSales(locationId)` en `src/lib/actions/cash-register.ts`:
+    Drizzle, con `requireLocationScope` + `assertManagerRole` dentro de la
+    propia funcion. Devuelve las ventas de la caja abierta (mas recientes
+    primero, incluidas las anuladas, marcadas) con cliente, servicios, metodo
+    de pago, total en centavos y la hora ya formateada en el servidor con la
+    zona horaria de la sede (evita desfase de hidratacion). 2 queries (ventas
+    + items), no N+1.
+  - `src/components/kortex/open-session-sales.tsx` (nuevo): lista con boton
+    "Anular" por venta (`aria-label` "Anular venta de <cliente>"), `Sheet` con
+    resumen (cliente, servicios, `MoneyDisplay`), aviso de que solo en efectivo
+    baja el esperado del cierre, campo "Motivo de la anulacion (obligatorio)"
+    y botones destructivo "Anular venta" / "Volver". Sin motivo, el sheet lo
+    pide en el propio campo y no llama al servidor. Tras anular: aviso
+    `role="status"` sobrio ("Venta anulada: <cliente>, RD$ 500.00. Ese monto
+    sale del efectivo esperado en el cierre."), sin exclamaciones ni emoji
+    (BRAND-BRIEF §2.2/§2.3), montos con `MoneyDisplay`; la fila pasa a
+    "Anulada" tras `router.refresh()`.
+  - `register/page.tsx`: monta la lista debajo del panel solo si es gerente y
+    hay caja abierta (el barbero no ve la lista; D-F2-9).
+- **Bug/hueco de seguridad encontrado y corregido:** `loadCashRegisterState`
+  (misma "use server") no llamaba a ningun guard: al ser una funcion exportada
+  de un modulo `"use server"` es tambien un endpoint invocable, asi que
+  cualquier usuario autenticado podia pedir el estado de caja de cualquier sede
+  pasando su id. Solo estaba protegida por el guard de las 3 paginas que la
+  llaman. Se agrego `await requireLocationScope(locationId)` dentro de la
+  funcion. Riesgo residual del mismo tipo: revisar el resto de las funciones de
+  lectura exportadas desde archivos `"use server"` (no se auditaron todas en
+  esta sesion).
+- **E2E `e2e/07-anular-venta.spec.ts`:** login como `admin.naco`; abre caja por
+  la UI si no hay (04-cerrar-caja la deja cerrada); cobra una venta libre en
+  efectivo (cliente nuevo con nombre unico); en `/register` intenta anular sin
+  motivo (verifica el mensaje y en la DB que la venta sigue `paid`); luego con
+  motivo. Verifica en pantalla el aviso y que desaparece el boton, y en la DB
+  `sales.status = 'refunded'` y `audit_log` `sale.refund` con `before.status =
+  'paid'`, `after.status = 'refunded'`, `after.reason` = el motivo y
+  `actor_user_id` = `admin.naco`. Limpia todo lo suyo (audit_log, venta con
+  sale_items en cascade, cliente y la caja si la abrio el, sin tocar la del
+  seed). Se reviso a ojo la pantalla (captura del sheet y del estado
+  posterior). Paso a la primera y en la corrida completa de 7 specs.
+- **Archivos:** `src/lib/actions/cash-register.ts`,
+  `src/components/kortex/open-session-sales.tsx` (nuevo),
+  `src/app/(location)/sede/[locationId]/register/page.tsx`,
+  `e2e/07-anular-venta.spec.ts` (nuevo).
+- **Deuda que queda (no es de esta tarea, observada):** `voidSaleAction` solo
+  cambia `sales.status`; no revierte `clients.total_visits/total_spent/
+  last_visit_at` ni devuelve la cita a un estado cobrable (queda `completed`), y
+  hay que revisar si el indice `sales_appointment_id_uq` excluye `refunded`
+  (para poder volver a cobrar esa cita). Anular una venta con caja ya cerrada
+  sigue bloqueado (correcto por F2-22) y la UI no lista ventas de cajas
+  cerradas. Tras cerrar la caja, la lista sigue visible hasta pulsar "Listo"
+  (el servidor rechaza igual si se intenta anular).
+
+### Limpieza de la base real y estado final
+
+- Los specs 01-04 (de F2-25) **no limpian sus datos** (dejan citas, clientes
+  "Cliente E2E ...", turnos "Walkin E2E ...", ventas, cajas y filas de
+  `audit_log`), y ademas 03/04 abren/cierran cajas. Al empezar esta sesion ya
+  habia residuo acumulado de sesiones anteriores. Al terminar se borro todo lo
+  identificable como E2E (ventas de clientes E2E, cajas fuera de las 2 del
+  seed, citas y turnos de E2E, 17 clientes E2E y las 52 filas de `audit_log`,
+  que el seed no genera) y se re-sembro. Resultado verificado con `count(*)`:
+  appointments 8, walk_in_queue 3, cash_sessions 2 (1 abierta = la de hoy del
+  seed), sales 5, sale_items 5, clients 5 (2 con cuenta + 3 walk-in),
+  audit_log 0, time_off 0.
+- **Deuda:** los specs 01-04 deberian limpiar lo suyo como hacen 05/06/07
+  (queda como tarea; no se toco en esta sesion para no ampliar el alcance).
+  Mientras tanto, cada corrida completa de Playwright deja residuo y hay que
+  limpiar a mano (o extender esos specs con `afterAll`).
+
+### Decisiones tomadas sin respaldo explicito en los backlogs
+
+1. Se agrego el guard dentro de `loadCashRegisterState` (arriba): cambio de
+   comportamiento minimo fuera del texto literal de la tarea, por ser un hueco
+   de seguridad evidente.
+2. `listOpenSessionSales` exige rol de gerente (no solo pertenecer a la sede):
+   la lista solo existe para anular.
+3. La lista muestra tambien las ventas ya anuladas (marcadas "Anulada") para
+   que el gerente vea el historial de la caja y el total coherente con el
+   cierre.
+4. El aviso post-anulacion distingue efectivo (baja el esperado) de otros
+   metodos (no lo cambia), porque el esperado de F2-23 solo suma ventas `cash`.
+5. Se creo `Textarea` como componente de `ui/` en lugar de `cloneElement` en
+   `FormField`, para no adivinar el tipo del hijo.
+6. La limpieza de residuos E2E previos a esta sesion (no solo los de esta
+   corrida) se hizo porque el encargo pedia dejar la base limpia; se identifico
+   por nombre "E2E" y por IDs fuera del rango del seed.
+
 ## 2026-09-18 — Cierre de sesión: F2 realmente cerrado, backlog de F3 listo
 
 **Estado al cerrar hoy:** F2 queda cerrado de verdad — los 6 E2E de Playwright
