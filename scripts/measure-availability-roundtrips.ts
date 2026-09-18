@@ -9,14 +9,14 @@ config({ path: ".env.local" });
  *
  * Uso: npx tsx --require ./scripts/stub-server-only.cjs scripts/measure-availability-roundtrips.ts
  *
- * Resultado medido el 2026-09-18 contra el proyecto Supabase real: 8
- * round-trips (location, barberos activos, servicio, override de
- * precio/duracion, schedules, barber_services, time_off, citas activas del
- * rango). Supera el AC de <=3 de F2-04. Documentado como deuda tecnica en
- * CHANGELOG.md en vez de optimizarse en esta tarea (F2-25 es de testing y
- * cierre, no de features; colapsar estas 8 queries en <=3 exigiria SQL a
- * mano con joins/CTEs que no estan autorizados sin pasar por el PM segun
- * regla dura §3.12 de BACKLOG-F2.md).
+ * Historial (contra el proyecto Supabase real):
+ *  - 2026-09-18 (F2-25): 8 round-trips (sede, barberos, servicio, override,
+ *    schedules, barber_services, time_off, citas). Incumplia el AC de <=3.
+ *  - 2026-09-18 (deuda saldada): 3 round-trips (sede+servicio+override en un
+ *    join; barberos+schedules+barber_services en un join; time_off UNION ALL
+ *    citas con subquery de barberos). Cumple el AC de F2-04.
+ * (La linea de `pg_type` que aparece al principio es la carga unica de OIDs
+ * de postgres.js al abrir la conexion, no es parte de getAvailability.)
  */
 async function main() {
   process.env.DEBUG_DB_ROUNDTRIPS = "1";

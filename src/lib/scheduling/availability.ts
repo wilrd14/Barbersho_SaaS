@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import {
@@ -98,12 +98,22 @@ export interface AvailabilityResult {
 }
 
 /**
- * Carga en el minimo de queries: sede (tz + business_hours), barberos
- * activos de la sede (o uno solo si `barberId`), sus bloques de `schedules`
- * en esa sede, `time_off` aprobado, citas activas del rango (de ese barbero
- * en CUALQUIER sede — el mismo barbero no puede solaparse entre sedes,
- * D-F2-5/§16.2), y la resolucion de precio/duracion efectivos (D-F2-1).
- * Delega el calculo puro a `getAvailableSlots` (F2-03).
+ * Carga la disponibilidad en 3 round-trips a la DB (AC de F2-04), sin
+ * depender de `Promise.all` (que no reduce round-trips, solo los solapa):
+ *
+ *  1. sede (tz + business_hours) LEFT JOIN servicio LEFT JOIN override de
+ *     precio/duracion de esa sede -> una fila.
+ *  2. barberos activos de la sede JOIN users LEFT JOIN `schedules` (bloques
+ *     activos en esa sede) LEFT JOIN `barber_services` (duracion custom) ->
+ *     una fila por (barbero x bloque de horario). `barber_services` tiene
+ *     indice unico (user, service), asi que no multiplica filas.
+ *  3. `time_off` aprobado UNION ALL citas activas del rango, ambos filtrados
+ *     por el subquery de barberos activos de la sede (no hace falta conocer
+ *     los ids de antemano). Las citas son las del barbero en CUALQUIER sede
+ *     (D-F2-5/§16.2): el mismo barbero no puede solaparse entre sedes.
+ *
+ * Delega el calculo puro a `getAvailableSlots` (F2-03). Contrato publico sin
+ * cambios respecto a la version de 8 queries.
  */
 export async function getAvailability(
   params: GetAvailabilityParams,
@@ -111,121 +121,161 @@ export async function getAvailability(
   const { locationId, serviceId, barberId, fromDate, toDate } = params;
   const now = params.now ?? new Date();
 
-  const [location] = await db
+  // Round-trip 1: sede + servicio + override.
+  const [head] = await db
     .select({
-      id: locations.id,
       timezone: locations.timezone,
       businessHours: locations.businessHours,
+      serviceId: services.id,
+      defaultDurationMinutes: services.defaultDurationMinutes,
+      defaultPrice: services.defaultPrice,
+      overrideId: locationServiceOverrides.id,
+      overridePrice: locationServiceOverrides.price,
+      overrideDurationMinutes: locationServiceOverrides.durationMinutes,
+      overrideIsActive: locationServiceOverrides.isActive,
     })
     .from(locations)
+    .leftJoin(services, eq(services.id, serviceId))
+    .leftJoin(
+      locationServiceOverrides,
+      and(
+        eq(locationServiceOverrides.locationId, locations.id),
+        eq(locationServiceOverrides.serviceId, serviceId),
+      ),
+    )
     .where(eq(locations.id, locationId))
     .limit(1);
 
-  if (!location) return { days: [] };
+  // Sede inexistente, o servicio inexistente (el LEFT JOIN de servicio no
+  // encontro fila): sin disponibilidad.
+  if (!head || head.serviceId === null) return { days: [] };
 
-  const businessHours = toBusinessHours(location.businessHours);
+  const location = { timezone: head.timezone };
+  const businessHours = toBusinessHours(head.businessHours);
+  const serviceRow = {
+    defaultDurationMinutes: head.defaultDurationMinutes!,
+    defaultPrice: head.defaultPrice!,
+  };
+  const override =
+    head.overrideId === null
+      ? null
+      : {
+          price: head.overridePrice,
+          durationMinutes: head.overrideDurationMinutes,
+          isActive: head.overrideIsActive!,
+        };
 
-  const barberRows = await db
+  // Barberos activos de la sede (o uno solo si `barberId`), reutilizado como
+  // subquery en el round-trip 3.
+  const barberFilter = and(
+    eq(barberLocations.locationId, locationId),
+    eq(barberLocations.isActive, true),
+    barberId ? eq(barberLocations.userId, barberId) : undefined,
+  );
+  const activeBarberIds = db
+    .select({ userId: barberLocations.userId })
+    .from(barberLocations)
+    .where(barberFilter);
+
+  // Round-trip 2: barberos + nombre + bloques de horario + duracion custom.
+  const barberScheduleRows = await db
     .select({
       userId: barberLocations.userId,
       fullName: users.fullName,
+      customDuration: barberServices.customDuration,
+      dayOfWeek: schedules.dayOfWeek,
+      startTime: schedules.startTime,
+      endTime: schedules.endTime,
     })
     .from(barberLocations)
     .innerJoin(users, eq(users.id, barberLocations.userId))
+    .leftJoin(
+      schedules,
+      and(
+        eq(schedules.userId, barberLocations.userId),
+        eq(schedules.locationId, locationId),
+        eq(schedules.isActive, true),
+      ),
+    )
+    .leftJoin(
+      barberServices,
+      and(
+        eq(barberServices.userId, barberLocations.userId),
+        eq(barberServices.serviceId, serviceId),
+      ),
+    )
+    .where(barberFilter);
+
+  if (barberScheduleRows.length === 0) return { days: [] };
+
+  // Round-trip 3: time_off aprobado UNION ALL citas activas del rango.
+  // Los limites del rango van como Date en los operadores tipados de Drizzle
+  // (lte/gte los serializan bien; la regla de .toISOString() aplica solo a
+  // interpolaciones crudas dentro de un template `sql`).
+  const rangeStart = new Date(`${fromDate}T00:00:00.000Z`);
+  const rangeEnd = new Date(`${toDate}T23:59:59.999Z`);
+  const blockRows = await db
+    .select({
+      kind: sql<string>`'time_off'`,
+      userId: timeOff.userId,
+      startsAt: timeOff.startsAt,
+      endsAt: timeOff.endsAt,
+    })
+    .from(timeOff)
     .where(
       and(
-        eq(barberLocations.locationId, locationId),
-        eq(barberLocations.isActive, true),
-        barberId ? eq(barberLocations.userId, barberId) : undefined,
+        inArray(timeOff.userId, activeBarberIds),
+        eq(timeOff.status, "approved"),
+        lte(timeOff.startsAt, rangeEnd),
+        gte(timeOff.endsAt, rangeStart),
       ),
-    );
-
-  if (barberRows.length === 0) return { days: [] };
-  const barberIds = barberRows.map((b) => b.userId);
-
-  const [serviceRow] = await db
-    .select({
-      id: services.id,
-      defaultDurationMinutes: services.defaultDurationMinutes,
-      defaultPrice: services.defaultPrice,
-    })
-    .from(services)
-    .where(eq(services.id, serviceId))
-    .limit(1);
-
-  if (!serviceRow) return { days: [] };
-
-  const [overrideRow, scheduleRows, barberServiceRows, timeOffRows, appointmentRows] =
-    await Promise.all([
+    )
+    .unionAll(
       db
         .select({
-          price: locationServiceOverrides.price,
-          durationMinutes: locationServiceOverrides.durationMinutes,
-          isActive: locationServiceOverrides.isActive,
-        })
-        .from(locationServiceOverrides)
-        .where(
-          and(
-            eq(locationServiceOverrides.locationId, locationId),
-            eq(locationServiceOverrides.serviceId, serviceId),
-          ),
-        )
-        .limit(1),
-      db
-        .select({
-          userId: schedules.userId,
-          dayOfWeek: schedules.dayOfWeek,
-          startTime: schedules.startTime,
-          endTime: schedules.endTime,
-        })
-        .from(schedules)
-        .where(
-          and(
-            eq(schedules.locationId, locationId),
-            inArray(schedules.userId, barberIds),
-            eq(schedules.isActive, true),
-          ),
-        ),
-      db
-        .select({ userId: barberServices.userId, customDuration: barberServices.customDuration })
-        .from(barberServices)
-        .where(
-          and(eq(barberServices.serviceId, serviceId), inArray(barberServices.userId, barberIds)),
-        ),
-      db
-        .select({ userId: timeOff.userId, startsAt: timeOff.startsAt, endsAt: timeOff.endsAt })
-        .from(timeOff)
-        .where(
-          and(
-            inArray(timeOff.userId, barberIds),
-            eq(timeOff.status, "approved"),
-            lte(timeOff.startsAt, new Date(`${toDate}T23:59:59.999Z`)),
-            gte(timeOff.endsAt, new Date(`${fromDate}T00:00:00.000Z`)),
-          ),
-        ),
-      // Citas activas del barbero en CUALQUIER sede de la cadena (D-F2-5).
-      db
-        .select({
-          barberId: appointments.barberId,
+          kind: sql<string>`'appointment'`,
+          userId: appointments.barberId,
           startsAt: appointments.startsAt,
           endsAt: appointments.endsAt,
         })
         .from(appointments)
         .where(
           and(
-            inArray(appointments.barberId, barberIds),
+            inArray(appointments.barberId, activeBarberIds),
             inArray(appointments.status, [...ACTIVE_APPOINTMENT_STATUSES]),
-            lte(appointments.startsAt, new Date(`${toDate}T23:59:59.999Z`)),
-            gte(appointments.endsAt, new Date(`${fromDate}T00:00:00.000Z`)),
+            lte(appointments.startsAt, rangeEnd),
+            gte(appointments.endsAt, rangeStart),
           ),
         ),
-    ]);
+    );
 
-  const override = overrideRow[0] ?? null;
-  const customDurationByBarber = new Map(
-    barberServiceRows.map((r) => [r.userId, r.customDuration]),
-  );
-  const barberNameById = new Map(barberRows.map((b) => [b.userId, b.fullName ?? "Barbero"]));
+  const timeOffRows = blockRows.filter((r) => r.kind === "time_off");
+  const appointmentRows = blockRows
+    .filter((r) => r.kind === "appointment")
+    .map((r) => ({ barberId: r.userId, startsAt: r.startsAt, endsAt: r.endsAt }));
+
+  // Reagrupa las filas (barbero x bloque) del round-trip 2 por barbero,
+  // conservando el orden de aparicion.
+  const barberIds: string[] = [];
+  const barberNameById = new Map<string, string>();
+  const customDurationByBarber = new Map<string, number | null>();
+  const scheduleRows: { userId: string; dayOfWeek: number; startTime: string; endTime: string }[] =
+    [];
+  for (const r of barberScheduleRows) {
+    if (!barberNameById.has(r.userId)) {
+      barberIds.push(r.userId);
+      barberNameById.set(r.userId, r.fullName ?? "Barbero");
+      customDurationByBarber.set(r.userId, r.customDuration ?? null);
+    }
+    if (r.dayOfWeek !== null && r.startTime !== null && r.endTime !== null) {
+      scheduleRows.push({
+        userId: r.userId,
+        dayOfWeek: r.dayOfWeek,
+        startTime: r.startTime,
+        endTime: r.endTime,
+      });
+    }
+  }
 
   const dates = listDatesBetween(fromDate, toDate);
   const days: AvailabilityDaySlots[] = [];
