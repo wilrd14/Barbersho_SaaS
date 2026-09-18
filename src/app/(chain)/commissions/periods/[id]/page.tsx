@@ -106,6 +106,7 @@ export default async function PeriodPage({ params }: { params: Promise<{ id: str
         totalNetCents={period.totals.totalNetCents}
         hasLines={period.lines.length > 0}
         closeBlockedReasons={period.readiness?.closeBlockedReasons ?? []}
+        csvHref={`/commissions/periods/${period.id}/csv`}
       />
     </div>
   )

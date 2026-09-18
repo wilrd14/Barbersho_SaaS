@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { test, expect } from "@playwright/test";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -106,6 +107,22 @@ test.describe.serial("Corte de Quincena", () => {
         and (s.created_at at time zone l.timezone)::date between ${range.startsOn}::date and ${range.endsOn}::date`);
     expect(lines.reduce((s, l) => s + Math.round(Number(l.servicesRevenue) * 100), 0)).toBe(Number(expected[0]!.revenue));
     expect(lines.reduce((s, l) => s + Math.round(Number(l.tipsAmount) * 100), 0)).toBe(Number(expected[0]!.tips));
+
+    // --- CSV: lo que se le manda al contador ------------------------------------
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("link", { name: "Descargar CSV" }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe(`corte-${range.startsOn}_${range.endsOn}.csv`);
+    const csvPath = await download.path();
+    const csv = readFileSync(csvPath!, "utf8");
+    expect(csv.charCodeAt(0)).toBe(0xfeff); // BOM: Excel lee bien las tildes
+    const csvRows = csv.slice(1).trim().split("\r\n");
+    expect(csvRows).toHaveLength(lines.length + 1);
+    const header = csvRows[0]!.split(",");
+    // Los montos son numericos (no "RD$..."), y la suma de la columna neto es EXACTAMENTE el total de la pantalla.
+    const csvNet = csvRows.slice(1).reduce((s, r) => s + Math.round(Number(r.split(",").at(header.indexOf("neto"))) * 100), 0);
+    expect(Number.isNaN(csvNet)).toBe(false);
+    expect(csvNet).toBe(netCents);
 
     // Sin bloqueadores todavia: el boton ya se puede usar.
     await expect(page.getByText("Nada pendiente. El corte se puede cerrar.")).toBeVisible();
@@ -264,7 +281,7 @@ test.describe.serial("Corte de Quincena", () => {
   test("un admin y un barbero reciben 403 en (chain)/commissions, incluido el corte por URL directa", async ({ page }) => {
     for (const email of [SEED.adminNaco, BARBER_1]) {
       await loginAs(page, email);
-      for (const path of ["/commissions", "/commissions/rules", "/commissions/periods", `/commissions/periods/${periodId}`]) {
+      for (const path of ["/commissions", "/commissions/rules", "/commissions/periods", `/commissions/periods/${periodId}`, `/commissions/periods/${periodId}/csv`]) {
         const response = await page.goto(path);
         expect(response?.status(), `${email} en ${path}`).toBe(403);
       }
