@@ -17,14 +17,10 @@ import * as schema from "./schema";
  * `prepare: false` porque el pooler de Supabase en modo transaccion (puerto
  * 6543) no soporta prepared statements por conexion.
  *
- * NOTA IMPORTANTE (transparencia con el equipo): en este sandbox de
- * desarrollo no hay cuenta de Cloudflare ni proyecto Supabase real
- * disponibles, asi que el spike no se pudo ejecutar end-to-end contra un
- * preview desplegado. El codigo sigue el patron documentado de Drizzle +
- * OpenNext + Cloudflare (mismo approach que usa el ejemplo oficial
- * `opennextjs-cloudflare` con Drizzle), pero falta la verificacion real en
- * Workers que pide el AC de S1-04. Queda como riesgo abierto documentado en
- * el reporte de cierre de sprint.
+ * Estado de la verificacion en Workers: el spike S1-04 se valido en workerd
+ * (wrangler dev) con el flujo completo de dinero y la suite E2E, ver
+ * CHANGELOG.md. Pendiente de medir en el Worker desplegado: limites de CPU,
+ * memoria y conexiones del pooler bajo carga real.
  */
 type Db = ReturnType<typeof drizzle<typeof schema>>;
 

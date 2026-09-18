@@ -8,7 +8,7 @@ import { defineConfig, devices } from "@playwright/test";
  *
  * Por defecto `webServer` levanta `next dev` automaticamente para que
  * `npx playwright test` sea autocontenible; si ya hay un dev server corriendo
- * en el puerto 3000 (uso local), lo reutiliza (`reuseExistingServer`) en vez
+ * en el puerto 3100 (uso local; no 3000, que suele ocupar otro proyecto local y se probaria la app equivocada), lo reutiliza (`reuseExistingServer`) en vez
  * de fallar con EADDRINUSE.
  *
  * `E2E_BASE_URL` (opcional): apunta la suite a un servidor YA levantado por
@@ -29,7 +29,7 @@ export default defineConfig({
   reporter: [["list"]],
   timeout: 30_000,
   use: {
-    baseURL: externalBaseUrl ?? "http://localhost:3000",
+    baseURL: externalBaseUrl ?? "http://localhost:3100",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
@@ -42,8 +42,8 @@ export default defineConfig({
   webServer: externalBaseUrl
     ? undefined
     : {
-        command: "npm run dev",
-        url: "http://localhost:3000",
+        command: "npm run dev -- -p 3100",
+        url: "http://localhost:3100",
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
       },
