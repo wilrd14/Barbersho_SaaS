@@ -138,4 +138,12 @@ test("un gerente anula una venta en efectivo desde la caja y queda refunded con 
   expect(after?.status).toBe("refunded");
   expect(after?.reason).toBe(REASON);
   expect(audit?.actorUserId).toBe(SEED_IDS.adminNacoId);
+
+  // 6. F3-09: un barbero no ve la lista de ventas de la caja ni ningun boton "Anular" (D-F2-9 / matriz 6.2).
+  await page.context().clearCookies();
+  await loginAs(page, SEED.barbero1);
+  await page.goto(`/sede/${SEED.naco}/register`);
+  await expect(page.getByRole("heading", { name: "Caja", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Ventas de esta caja" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Anular/ })).toHaveCount(0);
 });
