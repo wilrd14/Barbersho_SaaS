@@ -343,7 +343,7 @@ export async function rescheduleAppointmentAction(
         throw new Error("Solo un admin puede reasignar la cita a otro barbero.");
       }
 
-      const effective = await resolveEffectiveServiceFor(scope.locationId, current.serviceId, targetBarberId);
+      const effective = await resolveEffectiveServiceFor(scope.locationId, current.serviceId, targetBarberId, tx);
       if (!effective) {
         throw new Error("Ese servicio no esta disponible en esta sede para ese barbero.");
       }

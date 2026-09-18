@@ -1,5 +1,124 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — Auditoria post-F2-25: los 3 caminos de dinero/auditoria que faltaban por probar
+
+F2-25 (arriba) cerro 4 flujos criticos con E2E reales y corrigio 2 bugs de
+deadlock/validacion que bloqueaban toda operacion de dinero/auditoria — pero
+el propio cierre de F2-25 advertia que **solo esos 4 flujos se habian
+probado de punta a punta contra la DB real**. Esta sesion es esa auditoria
+pendiente: los otros 3 caminos de escritura/auditoria dentro de una
+transaccion que ningun E2E ejercitaba todavia.
+
+**Los 3 caminos auditados, cada uno con test permanente en verde:**
+
+1. **Cancelar cita del cliente** (F2-14, `cancelMyAppointmentAction`,
+   `src/lib/actions/client-appointments.ts`) — Playwright real
+   (`e2e/05-cancelar-cita-cliente.spec.ts`): la UI de `/appointments` ya
+   funciona, asi que se probo tal cual la usa un cliente real. Se siembra
+   una cita futura para `cliente1@donbigote.test` directo en la DB (el seed
+   no crea ninguna cita futura para un cliente con cuenta), se cancela desde
+   el boton real, y se verifica en la DB (no solo en pantalla) que
+   `status = 'cancelled'` y que `audit_log` tiene la fila
+   `appointment.cancel_client` con `before`/`after` correctos. **Sano, sin
+   cambios de codigo.**
+2. **Anular venta el mismo dia** (F2-22, `voidSaleAction`,
+   `src/lib/actions/checkout.ts`) — Vitest de integracion contra la DB real
+   (`src/lib/actions/__tests__/void-sale.integration.test.ts`), no
+   Playwright: se confirmo con `grep "voidSaleAction" src/` que **ningun
+   componente de UI llama esta funcion todavia** (existe desde F2-22 pero
+   nunca se conecto un boton). Sin pantalla que ejercitar, se mockeo solo
+   `getSessionContext` (la capa que lee la cookie de Supabase Auth en
+   produccion — mismo patron que `guards.test.ts`) para simular la sesion
+   de `admin.naco`, y se llamo `createSaleAction`/`voidSaleAction` de verdad
+   contra Supabase real. Verifica `sales.status = 'refunded'` y
+   `audit_log` (`sale.refund`) con `before.status = 'paid'`/
+   `after.status = 'refunded'`, mas un segundo intento de anular la misma
+   venta (debe fallar con mensaje legible, no colgarse). **Sano, sin
+   cambios de codigo — pero queda como deuda de producto que anular una
+   venta no tiene boton en ninguna pantalla (ver mas abajo).**
+3. **Reprogramar y reasignar cita** (F2-09, `rescheduleAppointmentAction`,
+   `src/lib/actions/appointments.ts`) — Playwright real
+   (`e2e/06-reprogramar-cita.spec.ts`) contra el sheet de detalle de "El
+   Dia". Para que fuera determinista sin pelear con los horarios ya
+   sembrados de F2-24 (anclados al momento en que se corrio el seed, no al
+   momento en que corre el test), se crean dos barberos temporales
+   dedicados solo a este test (sin ninguna cita previa) con horario que
+   cubre el dia completo. El test cambia la hora Y reasigna a otro barbero
+   desde el sheet real, y verifica en la DB que `barber_id`/`starts_at`
+   cambiaron y que `audit_log` (`appointment.reschedule`) tiene
+   `before`/`after` correctos. **Aqui SI aparecio un bug real — ver abajo.**
+
+**Bug real encontrado y corregido: mismo patron de deadlock que F2-25 ya
+habia corregido en `writeAuditLog`, esta vez en
+`resolveEffectiveServiceFor`.** El primer intento de correr el E2E de
+reprogramar se colgo (el boton "Guardar cambios" se quedaba girando para
+siempre); un test de Vitest aislado (llamando `rescheduleAppointmentAction`
+directo, sin navegador) confirmo el cuelgue con un timeout de 30s y
+`pg_stat_activity` sin ninguna sesion en estado real de espera — deadlock de
+aplicacion, no de Postgres, identico en forma al de F2-25. Causa:
+`resolveEffectiveServiceFor` (`src/lib/scheduling/availability.ts`, usada
+por F2-08/F2-09/F2-13) siempre corria sus tres `select` con el cliente `db`
+singleton (pool `max: 1`), nunca con el `tx` de la transaccion que la
+llama. `createAppointmentAction` (F2-08) y `createPublicBookingAction`
+(F2-13) la llaman ANTES de abrir su transaccion, asi que a ellos nunca les
+tocaba — pero `rescheduleAppointmentAction` (F2-09) la llama DENTRO de
+`db.transaction(async (tx) => ...)`, y ahi la transaccion ya tenia
+reservada la unica conexion del pool: el `select` esperaba para siempre una
+conexion libre que la propia transaccion (bloqueada esperando ese mismo
+`select`) nunca iba a soltar. **Fix:** `resolveEffectiveServiceFor` ahora
+acepta el ejecutor Drizzle (`db` o `tx`) como cuarto parametro opcional,
+mismo patron que el fix de `writeAuditLog`; el unico llamador dentro de una
+transaccion (`rescheduleAppointmentAction`) le pasa `tx` explicitamente.
+Verificado: el test de Vitest aislado paso de "timeout a los 30s" a
+"resuelve en ~1.2s" con el fix, y el E2E de Playwright completo (login real,
+click en el sheet, reprogramar, reasignar) pasa en ~10s.
+
+**Riesgo que esto confirma (ya lo advertia el CHANGELOG de F2-25):** el
+patron "una funcion que internamente usa el `db` singleton en vez de
+recibir el ejecutor real" es un bug de clase, no un incidente aislado — van
+dos apariciones (`writeAuditLog` en F2-25, `resolveEffectiveServiceFor`
+aqui) y ambas solo se manifiestan cuando la funcion se llama DESDE DENTRO
+de una transaccion, que es exactamente lo que ningun test automatizado
+ejercitaba hasta ahora. Se grepeo el resto de `src/lib/actions/*.ts` en
+busca de otros llamadores dentro de `db.transaction(async (tx) => ...)` que
+no reciban `tx` explicitamente (`resolveServiceEffective`/`resolveClientId`/
+`recalcQueueState`/`getTicketOrThrow` en `queue.ts`,
+`resolveEffectivePriceCents`/`resolveMaxDiscountPct` en `checkout.ts`) — los
+9 restantes SI reciben `tx` correctamente. No queda ningun otro caso
+conocido de este patron en el codigo actual.
+
+**Bug pre-existente encontrado por accidente, fuera del alcance de esta
+tarea, NO corregido:** al correr la suite completa de Playwright para
+confirmar que los especs nuevos no rompian nada, `e2e/02-dar-turno.spec.ts`
+(uno de los 4 E2E originales de F2-25, sin tocar en esta sesion) fallo con
+un error real visible en pantalla: `Failed query: select "user_id" from
+"time_off" where (...)`. Se confirmo que **no es una regresion de esta
+sesion** (`git stash` + correr el mismo spec contra el commit
+`9976418` sin ningun cambio mio reproduce el mismo fallo). Es un bug real en
+`recalcQueueState`/`queue.ts` (la consulta de `time_off` activo al calcular
+disponibilidad de "dar turno"), pero queda **fuera del alcance de esta
+tarea** (los 3 caminos asignados eran F2-14/F2-22/F2-09, no F2-16/17) y no
+se investigo a fondo por disciplina de presupuesto de la sesion. Se
+documenta aqui para que el equipo lo tome como proxima tarea — es
+potencialmente el mismo tipo de bug de clase que los dos de arriba (una
+consulta corriendo en el contexto equivocado), pero no se confirmo la causa
+raiz.
+
+**Deuda de producto confirmada (no es un bug, es una funcionalidad
+inconclusa):** `voidSaleAction` (F2-22) funciona perfectamente contra la DB
+real, pero no hay ningun boton en ninguna pantalla que la invoque — un
+gerente no tiene forma de anular una venta desde la UI de Kortex hoy. El
+backlog original (BACKLOG-F2.md) marcaba F2-22 como P1 "si se corta, se
+documenta como deuda tecnica"; se implemento la Server Action completa pero
+la conexion a la UI se quedo pendiente. Queda para una tarea futura de UI.
+
+**Verificado en este orden, los 4 comandos completos en verde:**
+`npm run typecheck`, `npm run lint` (0 errores), `npm run test` (103 tests,
+11 archivos — 2 nuevos vs los 101 de F2-25), `npm run build` (25 rutas,
+Turbopack). Los 6 E2E de Playwright (los 4 de F2-25 + los 2 nuevos) corridos
+en secuencia: 5 en verde, `02-dar-turno.spec.ts` en rojo por el bug
+pre-existente de arriba (confirmado no-regresion).
+
 ## 2026-09-18 — F2-25: tests y cierre de F2
 
 Última tarea de F2 (`BACKLOG-F2.md` §6, Bloque F). Objetivo: 100% en

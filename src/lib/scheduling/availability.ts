@@ -296,16 +296,40 @@ function parseHHMMSS(value: string): number {
 }
 
 /**
+ * Ejecutor Drizzle: el cliente normal (`db`) o una transaccion abierta con
+ * `db.transaction(async (tx) => ...)`. Mismo patron que `writeAuditLog`
+ * (`src/lib/auth/audit.ts`) — solo necesitamos el metodo `select`.
+ */
+type DbExecutor = Pick<typeof db, "select">;
+
+/**
  * Version ligera de la resolucion de precio/duracion efectivos para UNA
  * combinacion sede+servicio+barbero (F2-08/F2-09: crear o reprogramar una
  * cita desde la consola no necesita la rejilla completa de slots).
+ *
+ * Bug real encontrado en la auditoria post-F2-25 (mismo patron que el
+ * deadlock de `writeAuditLog` ya corregido): `rescheduleAppointmentAction`
+ * (F2-09) llama a esta funcion DENTRO de `db.transaction(async (tx) => ...)`,
+ * pero esta funcion siempre usaba el cliente `db` singleton (pool `max: 1`).
+ * La transaccion en curso ya tenia reservada la unica conexion del pool, asi
+ * que el primer `select` de aqui esperaba para siempre una conexion libre
+ * que la propia transaccion nunca iba a soltar — colgado silencioso, sin
+ * error, reproducido con un test de integracion que llama
+ * `rescheduleAppointmentAction` directo (sin UI) y expira a los 30s.
+ * `createAppointmentAction` (F2-08) y `createPublicBookingAction` (F2-13)
+ * llaman a esta misma funcion pero ANTES de abrir su transaccion, asi que
+ * a ellos nunca les tocaba este bug — solo a F2-09. Ahora acepta el
+ * ejecutor (`tx` o `db`) como parametro opcional; el unico llamador dentro
+ * de una transaccion (`rescheduleAppointmentAction`) le pasa `tx`
+ * explicitamente.
  */
 export async function resolveEffectiveServiceFor(
   locationId: string,
   serviceId: string,
   barberId: string,
+  executor: DbExecutor = db,
 ) {
-  const [serviceRow] = await db
+  const [serviceRow] = await executor
     .select({
       defaultDurationMinutes: services.defaultDurationMinutes,
       defaultPrice: services.defaultPrice,
@@ -316,7 +340,7 @@ export async function resolveEffectiveServiceFor(
 
   if (!serviceRow) return null;
 
-  const [overrideRow] = await db
+  const [overrideRow] = await executor
     .select({
       price: locationServiceOverrides.price,
       durationMinutes: locationServiceOverrides.durationMinutes,
@@ -331,7 +355,7 @@ export async function resolveEffectiveServiceFor(
     )
     .limit(1);
 
-  const [barberServiceRow] = await db
+  const [barberServiceRow] = await executor
     .select({ customDuration: barberServices.customDuration })
     .from(barberServices)
     .where(and(eq(barberServices.userId, barberId), eq(barberServices.serviceId, serviceId)))
