@@ -1,5 +1,110 @@
 # CHANGELOG — Kortex
 
+## 2026-09-18 — Auditoria de endpoints "use server", credenciales de Supabase y cierre de la tanda de deuda
+
+Entrada de coordinacion: junta lo que no quedo en las entradas de los agentes
+(las dos siguientes, mas abajo, detallan sus tareas).
+
+### 1. Hueco de seguridad: 4 funciones exportadas sin guard (corregido)
+
+- **Problema.** En un modulo `"use server"` de Next.js *toda* funcion exportada
+  es un endpoint HTTP invocable por cualquiera, sin sesion, con los argumentos
+  que quiera. El agente de la tanda de deuda encontro y arreglo
+  `loadCashRegisterState`; su reporte dejaba dicho que no auditó el resto.
+- **Auditoria hecha** (listado de todos los `export async function` de los 8
+  archivos `"use server"` y lectura de cada cuerpo). Sin guard estaban:
+  `loadCheckoutCatalog` y `loadAppointmentForCheckout` (`checkout.ts`),
+  `loadQueueSnapshot` y `loadAttendingNow` (`queue.ts`). Solo las protegian las
+  paginas que las llaman o los wrappers `*Action` (que si tenian guard), pero
+  las funciones `load*` estaban exportadas directamente. Exposicion: catalogo
+  de servicios/barberos y precios de cualquier sede, nombres y telefonos de la
+  fila de espera, y datos de cita/cliente del checkout, por `locationId`.
+- **Arreglo.** `await requireLocationScope(locationId)` como primera linea de
+  cada una (mismo criterio que `loadCashRegisterState`). Costo: una consulta
+  extra a `locations` por llamada (el contexto de sesion esta cacheado por
+  request); aceptable, la ruta caliente (refetch de La Fila) ya va debounced.
+- **Prevencion.** `src/lib/actions/__tests__/use-server-guards.test.ts`: test
+  estatico que recorre todos los archivos `"use server"` y falla si una funcion
+  exportada no llama a `requireLocation/Chain/Barber/ClientScope` o
+  `getSessionContext`, salvo una lista explicita de publicas por diseño
+  (`PUBLIC_BY_DESIGN`: reserva anonima y flujos de auth, 10 funciones).
+  Verificado que **detecta las 4 funciones sobre el codigo previo al arreglo**
+  (ejecutando la misma logica contra `git show HEAD:…`). Suma 27 tests (131 en
+  total). Limite conocido: es un analisis por texto, no un analisis de flujo;
+  una funcion que llame a un guard *despues* de haber leido datos, o solo en
+  una rama, pasaria el test. Sigue siendo necesaria la revision humana.
+- **Verificacion.** typecheck 0 errores; lint 0 errores; 131 tests; build de 25
+  rutas; Playwright 7/7 (las paginas de cola, checkout y caja ejercitan justo
+  las funciones tocadas). Commit `ab4df31`.
+
+### 2. Credenciales de Supabase: la "rotacion" no rotó nada (PENDIENTE, solo puede hacerlo Williams)
+
+- **Contexto.** Al inicio del proyecto Williams pego en el chat una clave
+  `sb_secret_…` (secret key nueva de Supabase). Despues pego una "nueva
+  secret_rol key" (`eyJ…`, JWT `service_role`) creyendo haber rotado la primera.
+- **Hallazgos verificados hoy.**
+  - Decodificado el payload de ambos JWT: la `service_role` "nueva" y la `anon`
+    tienen el **mismo `iat` (1789581121)**, es decir, se emitieron juntas al
+    crear el proyecto. Es la clave `service_role` **legacy original**, no una
+    rotada.
+  - Una peticion REST con la `sb_secret_…` original (`GET /rest/v1/chains`)
+    devuelve **HTTP 200**: **la clave expuesta sigue activa**.
+- **Consecuencia.** Hay claves con acceso total (saltan RLS) que estuvieron en
+  este chat: la `sb_secret_…` y la `service_role` JWT. Tambien estuvieron en el
+  chat la contraseña de la base de datos y la anon key (esta ultima es publica
+  por diseño, sin riesgo).
+- **Que debe hacer Williams** (Dashboard de Supabase, proyecto `Barbersho_SaaS`):
+  1. *Project Settings → API Keys*: **revocar/eliminar** la `sb_secret_…`
+     expuesta y, si se quiere seguir usando el formato nuevo, crear otra.
+  2. Rotar el **JWT secret** legacy (invalida `anon` y `service_role` legacy);
+     luego copiar las claves nuevas a `.env.local` (`NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+     `SUPABASE_SERVICE_ROLE_KEY`) y a `.dev.vars` si se usa wrangler.
+  3. *Project Settings → Database*: **resetear la contraseña** de la BD y
+     actualizar `DATABASE_URL`/`DIRECT_URL` en `.env.local` y `.dev.vars`.
+  4. Despues correr `npm run db:seed` y la suite E2E para confirmar que todo
+     sigue funcionando con las claves nuevas.
+  No se puede automatizar: ninguna herramienta conectada expone esa accion.
+  Convencion desde ahora: no pegar secretos en el chat; ponerlos directo en
+  `.env.local`.
+
+### 3. Cambios menores de esta coordinacion
+
+- `playwright.config.ts`: el puerto por defecto pasa de 3000 a **3100**
+  (`npm run dev -- -p 3100`). En esta maquina el 3000 lo ocupa el `next dev` de
+  otro proyecto (Agendalo); con `reuseExistingServer` la suite habria probado
+  la app equivocada sin avisar. `E2E_BASE_URL` sigue permitiendo apuntar a
+  otro servidor (p.ej. wrangler en `:8787`). Commit `6007e94`.
+- `src/lib/db/client.ts`: se reemplazo el comentario obsoleto que decia que el
+  spike de Workers no se habia podido verificar.
+- Verificado tras el cierre: suite Playwright 7/7 en modo por defecto y conteos
+  de la BD identicos al seed (appointments 8, walk_in_queue 3, cash_sessions 2,
+  sales 5, sale_items 5, clients 5, audit_log 0, time_off 0).
+
+### 4. Hallazgos abiertos que requieren decision de producto o revision
+
+- **`lookupClientHistoryAction` (reserva publica).** Dado `chainSlug` + telefono
+  devuelve el nombre completo y la ultima visita de ese cliente, **sin
+  sesion**. Es lo que pide D-F2-15 ("historial breve" en el paso 4), pero
+  permite a un anonimo enumerar telefonos y obtener nombres de clientes. Ideas:
+  devolver solo el nombre de pila, o solo un booleano "ya eres cliente", y/o
+  rate limiting en Cloudflare (D-F2-17 lo menciona pero no esta configurado).
+- **`voidSaleAction` (anular venta).** Solo cambia `sales.status`: no revierte
+  `clients.total_visits/total_spent/last_visit_at` ni devuelve la cita a un
+  estado cobrable; hay que revisar si el indice unico `sales_appointment_id_uq`
+  excluye las ventas `refunded` (si no, una cita anulada nunca se podria volver
+  a cobrar). Decision de producto pendiente.
+- **Worker de Cloudflare: el desplegado esta DESACTUALIZADO y roto.** Se intento
+  redesplegar en privado (`workers_dev: false`) con el arreglo de
+  cliente-por-request (`a5b7212`), pero Claude Code detuvo el `npm run deploy`
+  por poca memoria del sistema (no fue un fallo del deploy) y no se reintento.
+  Hasta que se redespliegue, el Worker subido es la version anterior, con el bug
+  del singleton de `postgres.js` (500 desde la segunda peticion con BD). Como no
+  tiene ruta publica, no afecta a nadie, pero **hay que correr `npm run deploy`
+  antes de activar el dominio**, con memoria libre y sin procesos huerfanos de
+  `wrangler`/`esbuild`/`workerd` de este repo.
+- **"F3 = MVP vendible" sigue siendo falso** (ver `BACKLOG-F3.md` §1): faltan las
+  pantallas CRUD de F1 y el email transaccional.
+
 ## 2026-09-18 — E2E que limpian lo suyo + flujo de dinero verificado en workerd (y un bug grave de runtime)
 
 Dos tareas, cuatro hallazgos reales (uno critico de Cloudflare, dos de higiene
