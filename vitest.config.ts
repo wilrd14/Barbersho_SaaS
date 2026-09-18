@@ -5,6 +5,9 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: false,
+    // Los tests de integracion comparten UNA base Supabase real (y el pool es max:1): en serie evita que un
+    // archivo cambie filas del seed (overrides de reglas, cajas) mientras otro las lee.
+    fileParallelism: false,
     include: ["src/**/*.test.ts"],
     setupFiles: ["./vitest.setup.ts"],
     // `npm run test:coverage`: F3 exige 100% en lib/commissions (PRD §15, BACKLOG-F3 §3.11).
