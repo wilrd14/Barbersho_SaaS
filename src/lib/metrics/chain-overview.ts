@@ -16,7 +16,7 @@ import {
 } from "@/lib/db/schema";
 import { roundHalfToEven } from "@/lib/pos";
 
-import { getLocationDailyMetrics } from "./daily";
+import { computeLiveDailyRows, getLocationDailyMetrics } from "./daily";
 import { aggregateTopBarbers, type TopBarberSale } from "./top-barbers";
 import {
   aggregateChain,
@@ -133,9 +133,21 @@ async function loadRows(
   const terminalBy = new Map(terminal.map((t) => [`${t.locationId}|${t.date}`, Number(t.n)]));
   const storedBy = new Map(stored.map((s) => [`${s.locationId}|${s.date}`, s]));
 
+  // Dias en curso (>= hoy): TODAS las sedes en una sola sentencia, en vivo y sin persistir.
+  const liveBy = new Map<string, DailyMetricsRow>();
+  for (const date of eachDate(startsOn, endsOn)) {
+    if (date < today) continue;
+    for (const row of await computeLiveDailyRows(ids, date, executor)) liveBy.set(`${row.locationId}|${date}`, row);
+  }
+
   const rows: DailyMetricsRow[] = [];
   for (const loc of locs) {
     for (const date of eachDate(startsOn, endsOn)) {
+      const live = liveBy.get(`${loc.id}|${date}`);
+      if (live) {
+        rows.push(live);
+        continue;
+      }
       const s = date < today ? storedBy.get(`${loc.id}|${date}`) : undefined;
       if (s) {
         const revenueCents = centsFromDecimalString(s.revenue);
@@ -180,8 +192,10 @@ export async function loadChainPositions(params: OverviewParams, executor: Chain
     .orderBy(asc(locations.name));
 
   const prev = previousRange(range);
-  const currentRows = await loadRows(locs, range.startsOn, range.endsOn, today, executor);
-  const prevRows = prev ? await loadRows(locs, prev.startsOn, prev.endsOn, today, executor) : [];
+  // Rango actual + anterior en UNA lectura (el anterior es contiguo): menos round-trips (P95, PRD §15).
+  const allRows = await loadRows(locs, prev ? prev.startsOn : range.startsOn, range.endsOn, today, executor);
+  const currentRows = allRows.filter((r) => r.date >= range.startsOn);
+  const prevRows = allRows.filter((r) => r.date < range.startsOn);
 
   const current = locs.map((l) => aggregateLocation(currentRows, l));
   const previous = locs.map((l) => aggregateLocation(prevRows, l));
@@ -230,11 +244,32 @@ export async function loadChainOverview(params: OverviewParams, executor: ChainO
       type: saleItems.type,
       lineTotal: saleItems.lineTotal,
       quantity: saleItems.quantity,
+      serviceId: saleItems.serviceId,
+      serviceName: services.name,
+      barberName: users.fullName,
     })
     .from(saleItems)
     .innerJoin(sales, eq(sales.id, saleItems.saleId))
     .innerJoin(locations, eq(locations.id, sales.locationId))
+    .leftJoin(services, eq(services.id, saleItems.serviceId))
+    .leftJoin(users, eq(users.id, saleItems.barberId))
     .where(inRange);
+
+  // Nombres de barberos y top de servicios salen de ESTA misma consulta (1 round-trip en vez de 3).
+  const nameById = new Map<string, string>();
+  const serviceTotals = new Map<string, { name: string; qty: number }>();
+  for (const r of topItemRows) {
+    if (r.barberId && r.barberName) nameById.set(r.barberId, r.barberName);
+    if (r.type === "service" && r.serviceId && r.serviceName) {
+      const t = serviceTotals.get(r.serviceId) ?? { name: r.serviceName, qty: 0 };
+      t.qty += Number(r.quantity);
+      serviceTotals.set(r.serviceId, t);
+    }
+  }
+  const serviceRows = [...serviceTotals.entries()]
+    .map(([serviceId, t]) => ({ serviceId, name: t.name, qty: t.qty }))
+    .sort((a, b) => b.qty - a.qty || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .slice(0, 5);
 
   const salesById = new Map<string, TopBarberSale>();
   for (const r of topItemRows) {
@@ -253,34 +288,6 @@ export async function loadChainOverview(params: OverviewParams, executor: ChainO
     salesById.set(r.saleId, sale);
   }
   const topTotals = aggregateTopBarbers([...salesById.values()]);
-  const barberNames =
-    topTotals.length === 0
-      ? []
-      : await executor
-          .select({ id: users.id, name: users.fullName })
-          .from(users)
-          .where(
-            inArray(
-              users.id,
-              topTotals.map((t) => t.barberId),
-            ),
-          );
-  const nameById = new Map(barberNames.map((n) => [n.id, n.name]));
-
-  const serviceRows = await executor
-    .select({
-      serviceId: saleItems.serviceId,
-      name: services.name,
-      qty: sql<number>`coalesce(sum(${saleItems.quantity}), 0)::int`,
-    })
-    .from(saleItems)
-    .innerJoin(sales, eq(sales.id, saleItems.saleId))
-    .innerJoin(locations, eq(locations.id, sales.locationId))
-    .innerJoin(services, eq(services.id, saleItems.serviceId))
-    .where(and(inRange, eq(saleItems.type, "service")))
-    .groupBy(saleItems.serviceId, services.name)
-    .orderBy(sql`sum(${saleItems.quantity}) desc`, asc(services.name))
-    .limit(5);
 
   return {
     ...base,

@@ -71,45 +71,40 @@ function openMinutes(businessHours: unknown, dow: number): number {
   return open !== null && close !== null && close > open ? close - open : 0;
 }
 
-interface LocationFacts {
-  timezone: string;
-  chairsCount: number;
-  businessHours: unknown;
+/** Dia calculado desde la fuente para una sede (incluye "hoy" local, leido en la misma sentencia). */
+interface ComputedDay {
+  row: DailyMetricsRow;
+  /** La ocupacion cruda paso de 100% (se topo). */
+  anomalous: boolean;
+  /** "Hoy" en la tz de la sede (YYYY-MM-DD). */
   todayLocal: string;
-  dow: number;
 }
 
-async function loadLocationFacts(
-  locationId: string,
+/**
+ * Calcula el dia de VARIAS sedes desde `sales`/`appointments`/`schedules` en UNA sentencia
+ * (CTEs agrupadas por sede) y lee en ella misma tz/sillas/horario/"hoy" de cada sede:
+ * 1 round-trip total en vez de 2 por sede (P95 de Vista Cadena, PRD §15).
+ * Las sedes inexistentes no aparecen en el Map.
+ */
+async function computeBatchFromSource(
+  locationIds: string[],
   date: string,
   executor: DailyMetricsExecutor,
-): Promise<LocationFacts> {
-  const rows = await executor
-    .select({
-      timezone: locations.timezone,
-      chairsCount: locations.chairsCount,
-      businessHours: locations.businessHours,
-      todayLocal: sql<string>`((now() at time zone ${locations.timezone})::date)::text`,
-      dow: sql<number>`extract(dow from ${date}::date)::int`,
-    })
-    .from(locations)
-    .where(eq(locations.id, locationId));
-  if (rows.length === 0) throw new Error(`Sede inexistente: ${locationId}.`);
-  const r = rows[0];
-  return { ...r, dow: Number(r.dow) };
-}
+): Promise<Map<string, ComputedDay>> {
+  const out = new Map<string, ComputedDay>();
+  if (locationIds.length === 0) return out;
+  const idList = sql.join(
+    locationIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
 
-/** Calcula el dia desde `sales`/`appointments`/`schedules` (1 sentencia con CTEs, ademas de `facts`). */
-async function computeFromSource(
-  locationId: string,
-  date: string,
-  facts: LocationFacts,
-  executor: DailyMetricsExecutor,
-): Promise<{ row: DailyMetricsRow; anomalous: boolean }> {
-  const tz = facts.timezone;
-
-  // Una sola sentencia (3 CTEs de una fila cada una): 1 round-trip en vez de 3 (P95 de Vista Cadena, PRD §15).
   const rows = await executor.execute<{
+    id: string;
+    timezone: string;
+    chairs_count: number;
+    business_hours: unknown;
+    today_local: string;
+    dow: number;
     revenue: string;
     sales_count: number;
     services: number;
@@ -120,74 +115,121 @@ async function computeFromSource(
     served_min: number;
     minutes: number;
   }>(sql`
-    with sl as (
-      select
+    with loc as (
+      select l.id, l.timezone, l.chairs_count, l.business_hours,
+             ((now() at time zone l.timezone)::date)::text as today_local,
+             extract(dow from ${date}::date)::int as dow
+      from locations l
+      where l.id in (${idList})
+    ),
+    sl as (
+      select s.location_id,
         coalesce(sum(s.subtotal - s.discount_amount), 0)::text as revenue,
         count(*)::int as sales_count,
         coalesce(sum(it.qty), 0)::int as services,
         (count(distinct s.client_id))::int as unique_clients,
-        (count(distinct s.client_id) filter (where (c.created_at at time zone ${tz})::date = ${date}::date))::int as new_clients
+        (count(distinct s.client_id) filter (where (c.created_at at time zone loc.timezone)::date = ${date}::date))::int as new_clients
       from sales s
+      join loc on loc.id = s.location_id
       left join clients c on c.id = s.client_id
       left join lateral (
         select sum(si.quantity) as qty from sale_items si where si.sale_id = s.id and si.type = 'service'
       ) it on true
-      where s.location_id = ${locationId}
-        and s.status = 'paid'
-        and (s.created_at at time zone ${tz})::date = ${date}::date
+      where s.status = 'paid'
+        and (s.created_at at time zone loc.timezone)::date = ${date}::date
+      group by s.location_id
     ),
     ap as (
-      select
-        (count(*) filter (where status = 'no_show'))::int as no_shows,
-        (count(*) filter (where status in ('completed', 'no_show', 'cancelled')))::int as terminal,
-        coalesce(sum(extract(epoch from (ends_at - starts_at)) / 60) filter (where status = 'completed'), 0)::int as served_min
-      from appointments
-      where location_id = ${locationId}
-        and (starts_at at time zone ${tz})::date = ${date}::date
+      select a.location_id,
+        (count(*) filter (where a.status = 'no_show'))::int as no_shows,
+        (count(*) filter (where a.status in ('completed', 'no_show', 'cancelled')))::int as terminal,
+        coalesce(sum(extract(epoch from (a.ends_at - a.starts_at)) / 60) filter (where a.status = 'completed'), 0)::int as served_min
+      from appointments a
+      join loc on loc.id = a.location_id
+      where (a.starts_at at time zone loc.timezone)::date = ${date}::date
+      group by a.location_id
     ),
     blocks as (
-      select sc.user_id,
-             ((${date}::date + sc.start_time) at time zone ${tz}) as bstart,
-             ((${date}::date + sc.end_time) at time zone ${tz}) as bend
+      select sc.location_id, sc.user_id,
+             ((${date}::date + sc.start_time) at time zone loc.timezone) as bstart,
+             ((${date}::date + sc.end_time) at time zone loc.timezone) as bend
       from schedules sc
-      where sc.location_id = ${locationId} and sc.is_active and sc.day_of_week = ${facts.dow}
+      join loc on loc.id = sc.location_id
+      where sc.is_active and sc.day_of_week = loc.dow
     ),
     hr as (
-      select coalesce(sum(greatest(0, extract(epoch from (b.bend - b.bstart)) / 60 - coalesce(ov.m, 0))), 0)::int as minutes
+      select b.location_id,
+             coalesce(sum(greatest(0, extract(epoch from (b.bend - b.bstart)) / 60 - coalesce(ov.m, 0))), 0)::int as minutes
       from blocks b
       left join lateral (
         select sum(greatest(0, extract(epoch from (least(t.ends_at, b.bend) - greatest(t.starts_at, b.bstart))) / 60)) as m
         from time_off t
         where t.user_id = b.user_id and t.status = 'approved'
-          and (t.location_id is null or t.location_id = ${locationId})
+          and (t.location_id is null or t.location_id = b.location_id)
           and t.starts_at < b.bend and t.ends_at > b.bstart
       ) ov on true
+      group by b.location_id
     )
-    select sl.revenue, sl.sales_count, sl.services, sl.unique_clients, sl.new_clients,
-           ap.no_shows, ap.terminal, ap.served_min, hr.minutes
-    from sl, ap, hr
+    select loc.id, loc.timezone, loc.chairs_count, loc.business_hours, loc.today_local, loc.dow,
+           coalesce(sl.revenue, '0') as revenue, coalesce(sl.sales_count, 0) as sales_count,
+           coalesce(sl.services, 0) as services, coalesce(sl.unique_clients, 0) as unique_clients,
+           coalesce(sl.new_clients, 0) as new_clients, coalesce(ap.no_shows, 0) as no_shows,
+           coalesce(ap.terminal, 0) as terminal, coalesce(ap.served_min, 0) as served_min,
+           coalesce(hr.minutes, 0) as minutes
+    from loc
+    left join sl on sl.location_id = loc.id
+    left join ap on ap.location_id = loc.id
+    left join hr on hr.location_id = loc.id
   `);
 
-  const s = rows[0];
-  const a = rows[0];
-  const util = utilizationBps(a.served_min, facts.chairsCount, openMinutes(facts.businessHours, facts.dow));
+  for (const r of rows) {
+    const util = utilizationBps(r.served_min, Number(r.chairs_count), openMinutes(r.business_hours, Number(r.dow)));
+    out.set(r.id, {
+      todayLocal: r.today_local,
+      anomalous: util?.anomalous ?? false,
+      row: {
+        locationId: r.id,
+        date,
+        revenueCents: centsFromDecimalString(r.revenue),
+        servicesCount: Number(r.services),
+        salesCount: Number(r.sales_count),
+        newClients: Number(r.new_clients),
+        uniqueClients: Number(r.unique_clients),
+        noShows: Number(r.no_shows),
+        terminalAppointments: Number(r.terminal),
+        utilizationBps: util?.bps ?? null,
+        barberHoursX100: roundHalfToEven(Number(r.minutes) * 100, 60),
+      },
+    });
+  }
+  return out;
+}
 
-  return {
-    anomalous: util?.anomalous ?? false,
-    row: {
-      locationId,
-      date,
-      revenueCents: centsFromDecimalString(s.revenue),
-      servicesCount: s.services,
-      salesCount: s.sales_count,
-      newClients: s.new_clients,
-      uniqueClients: s.unique_clients,
-      noShows: a.no_shows,
-      terminalAppointments: a.terminal,
-      utilizationBps: util?.bps ?? null,
-      barberHoursX100: roundHalfToEven(s.minutes * 100, 60),
-    },
-  };
+async function computeOne(locationId: string, date: string, executor: DailyMetricsExecutor): Promise<ComputedDay> {
+  const found = (await computeBatchFromSource([locationId], date, executor)).get(locationId);
+  if (!found) throw new Error(`Sede inexistente: ${locationId}.`);
+  return found;
+}
+
+/**
+ * Dia en curso (o futuro) de VARIAS sedes, calculado en vivo y sin persistir, en 1 round-trip.
+ * Pensado para Vista Cadena; el llamador es responsable de que `date` no sea un dia cerrado.
+ */
+export async function computeLiveDailyRows(
+  locationIds: string[],
+  date: string,
+  executor: DailyMetricsExecutor,
+): Promise<DailyMetricsRow[]> {
+  assertDate(date);
+  const batch = await computeBatchFromSource(locationIds, date, executor);
+  const rows: DailyMetricsRow[] = [];
+  for (const id of locationIds) {
+    const day = batch.get(id);
+    if (!day) throw new Error(`Sede inexistente: ${id}.`);
+    if (day.anomalous) console.warn(`[metrics] ocupacion >100% topada: sede ${id}, ${date}`);
+    rows.push(day.row);
+  }
+  return rows;
 }
 
 async function upsertRow(row: DailyMetricsRow, executor: DailyMetricsExecutor): Promise<void> {
@@ -222,8 +264,7 @@ export async function computeLocationDailyMetrics(
   executor: DailyMetricsExecutor,
 ): Promise<DailyMetricsRow> {
   assertDate(date);
-  const facts = await loadLocationFacts(locationId, date, executor);
-  const { row, anomalous } = await computeFromSource(locationId, date, facts, executor);
+  const { row, anomalous } = await computeOne(locationId, date, executor);
   if (anomalous) console.warn(`[metrics] ocupacion >100% topada: sede ${locationId}, ${date}`);
   return row;
 }
@@ -239,10 +280,9 @@ export async function recomputeLocationDailyMetrics(
   executor: DailyMetricsExecutor,
 ): Promise<DailyMetricsResult> {
   assertDate(date);
-  const facts = await loadLocationFacts(locationId, date, executor);
-  const { row, anomalous } = await computeFromSource(locationId, date, facts, executor);
+  const { row, anomalous, todayLocal } = await computeOne(locationId, date, executor);
   if (anomalous) console.warn(`[metrics] ocupacion >100% topada: sede ${locationId}, ${date}`);
-  const persisted = date < facts.todayLocal;
+  const persisted = date < todayLocal;
   if (persisted) await upsertRow(row, executor);
   return { row, anomalous, fromTable: false, persisted };
 }
@@ -254,10 +294,19 @@ export async function getLocationDailyMetrics(
   executor: DailyMetricsExecutor,
 ): Promise<DailyMetricsResult> {
   assertDate(date);
-  const facts = await loadLocationFacts(locationId, date, executor);
 
-  if (date >= facts.todayLocal) {
-    const { row, anomalous } = await computeFromSource(locationId, date, facts, executor);
+  const facts = await executor
+    .select({
+      timezone: locations.timezone,
+      todayLocal: sql<string>`((now() at time zone ${locations.timezone})::date)::text`,
+    })
+    .from(locations)
+    .where(eq(locations.id, locationId));
+  if (facts.length === 0) throw new Error(`Sede inexistente: ${locationId}.`);
+  const { timezone, todayLocal } = facts[0];
+
+  if (date >= todayLocal) {
+    const { row, anomalous } = await computeOne(locationId, date, executor);
     return { row, anomalous, fromTable: false, persisted: false };
   }
 
@@ -267,7 +316,7 @@ export async function getLocationDailyMetrics(
     .where(and(eq(locationDailyMetrics.locationId, locationId), eq(locationDailyMetrics.date, date)));
 
   if (stored.length === 0) {
-    const { row, anomalous } = await computeFromSource(locationId, date, facts, executor);
+    const { row, anomalous } = await computeOne(locationId, date, executor);
     if (anomalous) console.warn(`[metrics] ocupacion >100% topada: sede ${locationId}, ${date}`);
     await upsertRow(row, executor);
     return { row, anomalous, fromTable: false, persisted: true };
@@ -282,7 +331,7 @@ export async function getLocationDailyMetrics(
     .where(
       and(
         eq(appointments.locationId, locationId),
-        sql`(${appointments.startsAt} at time zone ${facts.timezone})::date = ${date}::date`,
+        sql`(${appointments.startsAt} at time zone ${timezone})::date = ${date}::date`,
       ),
     );
 
