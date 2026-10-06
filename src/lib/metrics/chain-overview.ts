@@ -162,10 +162,15 @@ async function loadRows(
   return rows;
 }
 
-export async function loadChainOverview(
-  params: { chainId: string; range: ResolvedRange | { startsOn: string; endsOn: string }; today: string },
-  executor: ChainOverviewExecutor,
-): Promise<ChainOverview> {
+export type ChainPositions = Pick<
+  ChainOverview,
+  "today" | "range" | "previous" | "chain" | "previousChain" | "revenueDeltaBps" | "positions"
+>;
+
+type OverviewParams = { chainId: string; range: ResolvedRange | { startsOn: string; endsOn: string }; today: string };
+
+/** Solo KPIs de cadena y Tabla de Posiciones (sin top barberos/servicios): lo que necesita `(chain)/compare`. */
+export async function loadChainPositions(params: OverviewParams, executor: ChainOverviewExecutor): Promise<ChainPositions> {
   const { chainId, range, today } = params;
 
   const locs: LocationLite[] = await executor
@@ -191,6 +196,21 @@ export async function loadChainOverview(
 
   const chain = aggregateChain(current, currentRows);
   const previousChain = aggregateChain(previous, prevRows);
+
+  return {
+    today,
+    range: { startsOn: range.startsOn, endsOn: range.endsOn },
+    previous: prev,
+    chain,
+    previousChain,
+    revenueDeltaBps: deltaBps(chain.revenueCents, previousChain.revenueCents),
+    positions,
+  };
+}
+
+export async function loadChainOverview(params: OverviewParams, executor: ChainOverviewExecutor): Promise<ChainOverview> {
+  const { chainId, range } = params;
+  const base = await loadChainPositions(params, executor);
 
   const localSaleDate = sql`((${sales.createdAt} at time zone ${locations.timezone})::date)`;
   const inRange = and(
@@ -263,13 +283,7 @@ export async function loadChainOverview(
     .limit(5);
 
   return {
-    today,
-    range: { startsOn: range.startsOn, endsOn: range.endsOn },
-    previous: prev,
-    chain,
-    previousChain,
-    revenueDeltaBps: deltaBps(chain.revenueCents, previousChain.revenueCents),
-    positions,
+    ...base,
     topBarbers: topTotals.map((t) => ({
       barberId: t.barberId,
       name: nameById.get(t.barberId) ?? "Sin nombre",

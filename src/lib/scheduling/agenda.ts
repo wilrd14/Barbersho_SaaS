@@ -3,6 +3,7 @@ import "server-only";
 import { and, eq, gt, gte, lt } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
+import { computeLocationDailyMetrics } from "@/lib/metrics/daily";
 import {
   appointments,
   barberLocations,
@@ -210,10 +211,12 @@ export async function getLocationDayKpis(
       .limit(1),
   ]);
 
-  const revenueToday = completedRows.reduce(
-    (sum, r) => sum + (r.priceAtBooking ? Number(r.priceAtBooking) : 0),
-    0,
-  );
+  // F3-16 / D-F3-13: una sola definicion de "ingreso" en todo el producto =
+  // Σ (subtotal - descuento) de ventas `paid` de la sede ese dia (tz de la sede),
+  // sin propina ni refunded. Misma funcion que alimenta la Tabla de Posiciones.
+  // Secuencial (no entra en el Promise.all de arriba).
+  const dayMetrics = await computeLocationDailyMetrics(locationId, dateISO, db);
+  const revenueToday = dayMetrics.revenueCents / 100;
 
   return {
     revenueToday,
