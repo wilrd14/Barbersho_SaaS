@@ -105,6 +105,19 @@ npm run billing:set-status -- --chain=don-bigote --status=active --period-end=20
 opcionales. El cambio escribe `audit_log` (`billing.set_status`) y se ve en
 `/billing` sin redeploy. No hay pasarela de pago integrada.
 
+## Medir el P95 de Vista Cadena
+
+PRD §15 exige P95 < 2 s con la tabla `location_daily_metrics` materializada:
+
+```bash
+npm run metrics:measure -- --chain=don-bigote --runs=30
+DEBUG_DB_ROUNDTRIPS=1 npm run metrics:measure -- --runs=1 --skip-backfill   # round-trips de una corrida
+```
+
+Materializa los ultimos 35 dias cerrados (idempotente), corre `loadChainOverview`
+para hoy / semana / mes, imprime p50, p95 y max, y sale con codigo 1 si el P95 de
+algun rango llega a `--limit-ms` (2000 por defecto). Requiere `.env.local` real.
+
 ## Estado de Sprint 1
 
 Ver el reporte de cierre de sprint (entregado por el desarrollador al PM) para

@@ -1,5 +1,131 @@
 # CHANGELOG — Kortex
 
+## 2026-10-06 — Cierre de F3 (F3-04..F3-19): El Corte, Vista Cadena, Tabla de Posiciones, drill-down, gate de suscripcion y Tu plan
+
+Todo sobre `main` en GitHub. Falta **F3-20 completo**: el E2E de cerrar periodo y las
+pruebas de integracion nuevas estan escritas pero **no se han corrido** (sin
+credenciales de BD en esta maquina), y el P95 no esta medido. Esta entrada
+documenta lo construido, lo decidido sin respaldo explicito y, sobre todo, **que
+NO se ha verificado**.
+
+### Construido (commits)
+
+| Tarea | Commit |
+|---|---|
+| F3-04 Reglas de Pago (CRUD + override por barbero y sede) | `fb5bc76` |
+| F3-05 Server Actions del ciclo del periodo | `170f725` |
+| F3-06 Corte de Quincena (pantallas, bloqueadores) | `1fb2ab8` |
+| F3-07 Recibo del barbero y "Lo mio" | `7ed5b9c` |
+| F3-08 Export CSV del corte | `193b4b2` |
+| F3-09 Anular venta en la UI | `abba89b` |
+| F3-10 Vista del corte para el admin de sede | `459b37a` |
+| F3-11 `lib/metrics` (puro; cobertura de `index.ts` reportada al 100%) | `e1bf88a` |
+| F3-17 `lib/billing` (puro) | `ffe0ed9` |
+| F3-12 Agregacion diaria, materializacion perezosa, `metrics:backfill` | `3f5d274` |
+| F3-13 Vista Cadena (`/overview`), incl. Top barberos neto de descuento | `b6a765a`, `9e46dff` |
+| F3-19 Tu plan + `billing:set-status` | `afed467` |
+| F3-14 Tabla de Posiciones, F3-15 banner lectura+, F3-16 ingreso de El Dia | `7d251a0` |
+| F3-18 Gate de suscripcion (layouts + Server Actions) | `bb20636` |
+
+Esta tanda (F3-20, medicion): `scripts/measure-chain-overview.ts` y
+`npm run metrics:measure` (backfill de 35 dias, p50/p95/max de hoy/semana/mes,
+falla si P95 >= 2000 ms), documentado en el README. **Escrito, no ejecutado.**
+
+### Verificado
+
+- `npm run typecheck` y `eslint` sobre `src` y `scripts`: sin errores.
+- Vitest sin pruebas de integracion: **320 pruebas en verde** (20 archivos) tras F3-18.
+- `npm run build` completo en verde segun el reporte de los subagentes de cada tarea.
+- **Verificacion SQL real por MCP de Supabase (solo SELECT), 2026-10-06**, contra
+  `eklezrodjrofyxhlakwe` (26 tablas, migraciones 0000-0004 aplicadas, 29 policies,
+  0 tablas sin RLS): las consultas de `daily.ts`, `chain-overview.ts` y `top-barbers.ts`
+  se ejecutaron en Postgres 17 y coinciden **al centavo** con sumas manuales
+  independientes:
+  - Ingreso del 16-sep (tz de la sede): Naco RD$6,850.00 / 14 ventas; Bella Vista
+    RD$2,700.00 / 5 (la venta `refunded` de RD$350 queda fuera); San Cristobal
+    RD$1,900.00 / 4.
+  - Vista Cadena 10-16 sep: RD$64,912.49 en 131 ventas = suma por sede = suma de
+    lineas menos descuentos; el neto de Top barberos suma el mismo total.
+  - Borde de zona horaria probado con timestamps literales (03:45 UTC = 23:45 local
+    cae en el dia 16; 04:15 UTC = 00:15 local cae en el 17). El seed no tiene ventas
+    reales cerca de medianoche.
+
+### NO verificado contra una BD real (pendiente de verificar)
+
+`.env.local` tiene aun `REEMPLAZAR_*` (anon key, service role, password de la BD),
+asi que nada que use `DATABASE_URL` ha corrido:
+
+- **Escrituras de `daily.ts`**: `upsert` y `metrics:backfill` (`location_daily_metrics`
+  sigue en 0 filas), y su idempotencia.
+- **P95 de Vista Cadena** (< 2 s, PRD §15) y los round-trips reales de los loaders.
+- Las **paginas con datos** (`/overview`, `/compare`, `/billing`, El Dia) en navegador,
+  y que el ingreso de El Dia coincida al centavo con la Tabla de Posiciones.
+- **Gate de suscripcion con la suscripcion del seed**: solo hay pruebas con ejecutor falso.
+- **Pruebas de integracion nuevas** (`daily.integration.test.ts`, `cycle.*`,
+  `payout-periods.*`, `commission-rules.*`, etc.) y el **E2E `08-corte-quincena`**
+  (flujo critico "cerrar periodo", PRD §15): escritos, **no corridos en esta sesion**.
+  En la suite sin credenciales fallan solo las que necesitan la BD
+  (`cycle.invariant`, `f3-integrity`).
+- `billing:set-status` contra la BD real y el banner de lectura+ en navegador.
+
+### Decisiones sin respaldo explicito en el backlog
+
+1. **Lectura por bloque en `chain-overview.ts`**: los dias cerrados se leen de
+   `location_daily_metrics` en bloque (no ~180 llamadas por rango de 30 dias); solo los
+   huecos y el dia en curso pasan por `getLocationDailyMetrics`. Repite el mapeo de fila
+   guardada de `daily.ts`.
+2. **`uniqueClients` de un rango = suma de los `unique_clients` diarios** (visitas-cliente
+   por dia, no clientes distintos): no se pueden derivar distintos desde filas diarias.
+3. **`salesCount` de filas persistidas = `revenue / avg_ticket`** (la tabla no guarda el
+   numero de ventas); si todas las ventas del dia tuvieron 100% de descuento queda en 0.
+   Tampoco se guardan las citas terminales: se consultan a `appointments` al leer.
+4. **Tope de 400 dias en `metrics:backfill`** (el backlog no preve tope).
+5. **"Minutos atendidos" de la ocupacion = minutos de citas `completed`**
+   (`in_progress` no cuenta). `barber_hours` = bloques de `schedules` activos menos
+   `time_off` aprobado; dos permisos solapados se restan de mas (resultado topado en 0).
+6. **Ocupacion del periodo = promedio simple de los dias con dato** (no ponderado).
+7. **Gate de suscripcion**: una cadena **sin fila de `subscriptions` no se bloquea**; la
+   gracia de 7 dias es inclusiva; prueba sin `trial_ends_at` o `past_due` sin
+   `current_period_end` = restringido. No se gatearon lecturas ni la cancelacion de citas
+   por el cliente; `checkout` y `register` no tienen gate de pagina (cobrar y cerrar una
+   caja abierta nunca se bloquean); abrir caja y anular venta si se bloquean en "bloqueado".
+8. **Banner de lectura+** persiste con `sessionStorage` por sede (solo superuser):
+   efecto colateral, un superuser que reabre esa sede en la misma pestana sigue viendo
+   el banner hasta pulsar "Volver a Vista Cadena".
+9. **Top barberos** = ingreso neto de descuento (prorrateo D-F3-5), no `line_total` bruto.
+
+### Seguridad: pendiente y sin tratar
+
+- **Claves de Supabase expuestas en sesiones previas siguen sin rotar** (entrada del
+  2026-09-18). Solo Williams puede hacerlo desde el dashboard.
+- Advertencias de `get_advisors` (2026-10-06): `auth_chain_ids()` y `rls_auto_enable()` son
+  `SECURITY DEFINER` y ejecutables por `anon` y `authenticated` (revocar `EXECUTE` a `anon`
+  exige una migracion que **no esta autorizada en el backlog: escalar al PM**);
+  `btree_gist` instalado en `public`; la proteccion contra contrasenas filtradas de
+  Auth esta desactivada. Ninguna advertencia de "RLS disabled".
+- El proyecto Supabase estaba **INACTIVE (pausado)** y se reactivo el 2026-10-06. Una
+  consulta hecha mientras levantaba (`COMING_UP`) dio un resultado falso de "BD vacia";
+  fue un error de diagnostico, la BD esta intacta (seed: 614 ventas, 11 usuarios de Auth).
+
+### Riesgos y deuda abiertos de F3
+
+- **F3 no es "MVP vendible"** (BACKLOG-F3 §1/D-F3-19): faltan las pantallas CRUD de F1
+  (sedes, equipo, servicios, horarios, onboarding) y el email transaccional (§16.10). F4.
+- **Alquiler de silla sin ventas**: un barbero de silla fija sin ventas ni propinas en la
+  quincena no genera linea y no se le imputa renta (preguntar al PM).
+- **Ajustes manuales se pierden al recalcular**: `adjustments` sale en 0 del motor y
+  recalcular borra e inserta las lineas; F3-05 debe releer y reaplicar ajustes o prohibir
+  recalcular tras ajustar (pendiente de verificar el comportamiento implementado).
+- **`voidSaleAction`** no revierte `clients.total_visits/total_spent/last_visit_at` ni devuelve
+  la cita a un estado cobrable (decision de producto pendiente).
+- **`lookupClientHistoryAction`** (reserva publica) permite a un anonimo enumerar telefonos y
+  obtener nombres; sin rate limiting de Cloudflare configurado (D-F2-17).
+- Worker de Cloudflare desplegado desactualizado: correr `npm run deploy` antes de activar
+  el dominio. Costo de conexion por request en Workers (~0.4 s); evaluar Hyperdrive.
+- `sale_items` no tiene `created_at`: el desempate del residuo de centavos usa `id`.
+- La cobertura 100% de `lib/commissions` (F3-02) y de `lib/metrics/index.ts` (F3-11) se
+  reporto al implementar; no se volvio a medir en esta tanda.
+
 ## 2026-09-18 — F3 Bloque A: migracion 0004, seed de una quincena real, motor de comisiones puro y capa de lectura
 
 Cuatro tareas del `BACKLOG-F3.md` (F3-00, F3-01, F3-02, F3-03), un commit por
