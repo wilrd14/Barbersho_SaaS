@@ -15,6 +15,7 @@
     "db:migrate": "tsx --require ./scripts/stub-server-only.cjs src/lib/db/migrate.ts",
     "db:seed": "tsx --require ./scripts/stub-server-only.cjs src/lib/db/seed.ts",
     "metrics:backfill": "tsx --require ./scripts/stub-server-only.cjs scripts/metrics-backfill.ts",
+    "billing:set-status": "tsx --require ./scripts/stub-server-only.cjs scripts/billing-set-status.ts",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy"
   },

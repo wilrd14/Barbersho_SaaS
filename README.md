@@ -91,6 +91,20 @@ Cloudflare Workers via `@opennextjs/cloudflare` · Sentry.
   README de esa carpeta para las reglas de uso de cada uno.
 - `src/types/action-result.ts` — convencion de resultado para Server Actions.
 
+## Suscripcion de la cadena (piloto)
+
+El cobro del piloto se hace fuera de Kortex (transferencia). Al recibir el
+pago, mueve el estado con:
+
+```bash
+npm run billing:set-status -- --chain=don-bigote --status=active --period-end=2026-11-18
+```
+
+`--status` acepta `trialing|active|past_due|cancelled`; `--trial-ends` y
+`--period-end` (YYYY-MM-DD, fin de ese dia en hora de Santo Domingo) son
+opcionales. El cambio escribe `audit_log` (`billing.set_status`) y se ve en
+`/billing` sin redeploy. No hay pasarela de pago integrada.
+
 ## Estado de Sprint 1
 
 Ver el reporte de cierre de sprint (entregado por el desarrollador al PM) para
