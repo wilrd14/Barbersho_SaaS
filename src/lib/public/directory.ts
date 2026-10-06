@@ -17,6 +17,7 @@ import {
 } from "@/lib/db/schema";
 import { resolveEffectiveService } from "@/lib/scheduling/effective-service";
 import { formatWeekdayRanges } from "@/lib/public/coverage";
+import { RESERVED_CHAIN_SLUGS } from "@/lib/public/reserved-slugs";
 
 /**
  * F2-10/F2-11 · Lecturas publicas (Server Components), regla dura §3.5: la
@@ -25,19 +26,9 @@ import { formatWeekdayRanges } from "@/lib/public/coverage";
  * `select *` sobre `clients`/`users`/`sales` aqui.
  */
 
-// Slugs reservados por el App Router / segmentos estaticos (D-F2-3): una
-// cadena no puede llamarse asi. La validacion definitiva vive en el Zod del
-// alta de cadena (onboarding, fuera de alcance de F2); esta lista es la
-// defensa de lectura publica mientras tanto.
-export const RESERVED_CHAIN_SLUGS = new Set([
-  "book",
-  "api",
-  "login",
-  "register",
-  "sede",
-  "admin",
-  "_next",
-]);
+// Slugs reservados (D-F2-3 / D-F4-3): la lista vive en un unico modulo puro,
+// `reserved-slugs.ts`; aqui se reexporta con el mismo nombre y contrato de F2.
+export { RESERVED_CHAIN_SLUGS };
 
 export interface PublicChain {
   id: string;

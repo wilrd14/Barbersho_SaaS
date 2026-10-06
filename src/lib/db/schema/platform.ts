@@ -48,9 +48,11 @@ export const notifications = pgTable("notifications", {
   chainId: uuid("chain_id")
     .notNull()
     .references(() => chains.id, { onDelete: "restrict" }),
-  recipientUserId: uuid("recipient_user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
+  // F4 (0005, D-F4-7): nullable. El cliente de la reserva publica no tiene cuenta;
+  // un CHECK exige `payload.email` cuando no hay destinatario-usuario.
+  recipientUserId: uuid("recipient_user_id").references(() => users.id, {
+    onDelete: "cascade",
+  }),
   channel: notificationChannel("channel").notNull(),
   template: text("template").notNull(),
   payload: jsonb("payload"),
