@@ -17,6 +17,7 @@ import {
 import { roundHalfToEven } from "@/lib/pos";
 
 import { getLocationDailyMetrics } from "./daily";
+import { aggregateTopBarbers, type TopBarberSale } from "./top-barbers";
 import {
   aggregateChain,
   aggregateLocation,
@@ -53,7 +54,7 @@ export interface PositionRow extends LocationPeriodTotals {
 export interface TopBarber {
   barberId: string;
   name: string;
-  /** Suma de `line_total` de sus lineas de servicio (sin prorratear descuento), en centavos. */
+  /** Ingreso neto de descuento de sus lineas de servicio (D-F3-5), en centavos. */
   producedCents: number;
   servicesCount: number;
 }
@@ -198,21 +199,53 @@ export async function loadChainOverview(
     sql`${localSaleDate} between ${range.startsOn}::date and ${range.endsOn}::date`,
   );
 
-  const barberRows = await executor
+  // Todas las lineas (servicio y producto) de las ventas pagadas del rango: el descuento se
+  // prorratea entre todas (D-F3-5) y la agregacion neta vive en el modulo puro `top-barbers`.
+  const topItemRows = await executor
     .select({
+      saleId: sales.id,
+      discount: sales.discountAmount,
+      itemId: saleItems.id,
       barberId: saleItems.barberId,
-      name: users.fullName,
-      produced: sql<string>`coalesce(sum(${saleItems.lineTotal}), 0)::text`,
-      qty: sql<number>`coalesce(sum(${saleItems.quantity}), 0)::int`,
+      type: saleItems.type,
+      lineTotal: saleItems.lineTotal,
+      quantity: saleItems.quantity,
     })
     .from(saleItems)
     .innerJoin(sales, eq(sales.id, saleItems.saleId))
     .innerJoin(locations, eq(locations.id, sales.locationId))
-    .innerJoin(users, eq(users.id, saleItems.barberId))
-    .where(and(inRange, eq(saleItems.type, "service")))
-    .groupBy(saleItems.barberId, users.fullName)
-    .orderBy(sql`sum(${saleItems.lineTotal}) desc`, asc(users.fullName))
-    .limit(5);
+    .where(inRange);
+
+  const salesById = new Map<string, TopBarberSale>();
+  for (const r of topItemRows) {
+    const sale = salesById.get(r.saleId) ?? {
+      status: "paid",
+      discountCents: centsFromDecimalString(r.discount),
+      items: [],
+    };
+    sale.items.push({
+      id: r.itemId,
+      barberId: r.barberId,
+      type: r.type,
+      lineTotalCents: centsFromDecimalString(r.lineTotal),
+      quantity: Number(r.quantity),
+    });
+    salesById.set(r.saleId, sale);
+  }
+  const topTotals = aggregateTopBarbers([...salesById.values()]);
+  const barberNames =
+    topTotals.length === 0
+      ? []
+      : await executor
+          .select({ id: users.id, name: users.fullName })
+          .from(users)
+          .where(
+            inArray(
+              users.id,
+              topTotals.map((t) => t.barberId),
+            ),
+          );
+  const nameById = new Map(barberNames.map((n) => [n.id, n.name]));
 
   const serviceRows = await executor
     .select({
@@ -237,11 +270,11 @@ export async function loadChainOverview(
     previousChain,
     revenueDeltaBps: deltaBps(chain.revenueCents, previousChain.revenueCents),
     positions,
-    topBarbers: barberRows.map((b) => ({
-      barberId: b.barberId,
-      name: b.name ?? "Sin nombre",
-      producedCents: centsFromDecimalString(b.produced),
-      servicesCount: Number(b.qty),
+    topBarbers: topTotals.map((t) => ({
+      barberId: t.barberId,
+      name: nameById.get(t.barberId) ?? "Sin nombre",
+      producedCents: t.producedCents,
+      servicesCount: t.servicesCount,
     })),
     topServices: serviceRows.flatMap((s) =>
       s.serviceId ? [{ serviceId: s.serviceId, name: s.name, servicesCount: Number(s.qty) }] : [],
