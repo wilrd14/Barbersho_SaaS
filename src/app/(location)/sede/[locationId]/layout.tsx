@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { requireLocationScope } from "@/lib/auth/guards";
 import { db } from "@/lib/db/client";
 import { locations } from "@/lib/db/schema";
+import { SubscriptionGate } from "@/components/kortex/subscription-gate";
 import { ReadonlyVisitBanner } from "@/components/kortex/readonly-visit-banner";
 
 interface LocationLayoutProps {
@@ -35,7 +36,10 @@ export default async function LocationLayout({
   return (
     <>
       {locationName ? <ReadonlyVisitBanner locationId={locationId} locationName={locationName} isSuperuser /> : null}
-      {children}
+      {/* F3-18: banner de suscripcion; el area "billing" nunca se bloquea aqui, cada seccion declara la suya. */}
+      <SubscriptionGate chainId={scope.chainId} area="billing">
+        {children}
+      </SubscriptionGate>
     </>
   );
 }

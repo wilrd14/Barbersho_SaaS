@@ -26,6 +26,7 @@ import { z } from "zod";
 
 import { assertManagerRole } from "@/lib/actions/money-utils";
 import { requireChainScope, requireLocationScope } from "@/lib/auth/guards";
+import { assertAreaAllowed } from "@/lib/billing/gate";
 import { db } from "@/lib/db/client";
 import {
   adjustLineInTx,
@@ -68,6 +69,9 @@ export async function createPayoutPeriodAction(input: unknown): Promise<ActionRe
 
   const scope = await requireChainScope();
 
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
+
   try {
     return await db.transaction((tx) =>
       createPeriodInTx(tx, {
@@ -109,6 +113,10 @@ export async function calculatePayoutPeriodAction(input: unknown): Promise<Actio
     userId = scope.userId;
   }
 
+  // F3-18: calcular el corte es analitica/administracion; se bloquea con prueba vencida (D-F3-16).
+  const gate = await assertAreaAllowed(chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
+
   try {
     return await db.transaction((tx) => calculatePeriodInTx(tx, { chainId, actorUserId: userId, periodId: parsed.data.periodId }));
   } catch (err) {
@@ -129,6 +137,9 @@ export async function approvePayoutPeriodAction(
   if (!parsed.success) return actionError(firstIssue(parsed.error));
 
   const scope = await requireChainScope();
+
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     return await db.transaction(async (tx) => {
@@ -154,6 +165,9 @@ export async function markPayoutPeriodPaidAction(input: unknown): Promise<Action
   if (!parsed.success) return actionError(firstIssue(parsed.error));
 
   const scope = await requireChainScope();
+
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     return await db.transaction((tx) =>
@@ -183,6 +197,9 @@ export async function adjustPayoutLineAction(
   if (!parsed.success) return actionError(firstIssue(parsed.error));
 
   const scope = await requireChainScope();
+
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     return await db.transaction((tx) =>

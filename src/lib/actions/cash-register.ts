@@ -13,6 +13,7 @@ import { z } from "zod";
 import { zUuid } from "@/lib/validation/id";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 
+import { assertAreaAllowed } from "@/lib/billing/gate";
 import { db } from "@/lib/db/client";
 import { cashSessions, clients, locations, saleItems, sales, services, users } from "@/lib/db/schema";
 import { requireLocationScope } from "@/lib/auth/guards";
@@ -213,6 +214,10 @@ export async function openCashSessionAction(
 
   const scope = await requireLocationScope(parsed.data.locationId);
 
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(scope.chainId, "operation", db);
+  if (!gate.ok) return actionError(gate.error);
+
   try {
     assertManagerRole(scope);
   } catch (err) {
@@ -278,6 +283,10 @@ export async function closeCashSessionAction(
   if (!parsed.success) return actionError(parsed.error.issues[0]?.message ?? "Datos invalidos.");
 
   const scope = await requireLocationScope(parsed.data.locationId);
+
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(scope.chainId, "operation", db, "close_open_cash_session");
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     assertManagerRole(scope);

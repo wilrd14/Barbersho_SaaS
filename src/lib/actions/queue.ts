@@ -37,6 +37,7 @@ import { z } from "zod";
 import { zUuid } from "@/lib/validation/id";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
+import { assertAreaAllowed, enforceAreaAllowed } from "@/lib/billing/gate";
 import { db } from "@/lib/db/client";
 import { requireLocationScope } from "@/lib/auth/guards";
 import { writeAuditLog } from "@/lib/auth/audit";
@@ -389,6 +390,10 @@ export async function joinQueue(
 
   const { chainId, locationId } = await requireLocationScope(data.locationId);
 
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(chainId, "operation", db);
+  if (!gate.ok) return actionError(gate.error);
+
   try {
     const ticketId = await db.transaction(async (tx) => {
       // Re-verifica que el servicio se ofrezca en esta sede (D-F2-1) antes de crear el turno.
@@ -445,7 +450,10 @@ export async function callTicket(input: unknown): Promise<ActionResult<{ ticketI
   try {
     const ticketId = await db.transaction(async (tx) => {
       const ticket = await getTicketOrThrow(tx, parsed.data.ticketId);
-      await requireLocationScope(ticket.locationId);
+      const { chainId } = await requireLocationScope(ticket.locationId);
+
+      // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+      await enforceAreaAllowed(chainId, "operation", tx);
       assertTransition(ticket.status, "called");
 
       await tx
@@ -482,6 +490,9 @@ export async function startServing(
     const result = await db.transaction(async (tx) => {
       const ticket = await getTicketOrThrow(tx, parsed.data.ticketId);
       const { chainId, locationId } = await requireLocationScope(ticket.locationId);
+
+      // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+      await enforceAreaAllowed(chainId, "operation", tx);
       assertTransition(ticket.status, "serving");
 
       const barberId = parsed.data.barberId ?? ticket.preferredBarberId;
@@ -569,7 +580,10 @@ export async function markDone(input: unknown): Promise<ActionResult<{ ticketId:
   try {
     const ticketId = await db.transaction(async (tx) => {
       const ticket = await getTicketOrThrow(tx, parsed.data.ticketId);
-      await requireLocationScope(ticket.locationId);
+      const { chainId } = await requireLocationScope(ticket.locationId);
+
+      // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+      await enforceAreaAllowed(chainId, "operation", tx);
       assertTransition(ticket.status, "done");
 
       await tx.update(walkInQueue).set({ status: "done" }).where(eq(walkInQueue.id, ticket.id));
@@ -600,6 +614,9 @@ export async function markLeft(input: unknown): Promise<ActionResult<{ ticketId:
     const ticketId = await db.transaction(async (tx) => {
       const ticket = await getTicketOrThrow(tx, parsed.data.ticketId);
       const { chainId, locationId, userId } = await requireLocationScope(ticket.locationId);
+
+      // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+      await enforceAreaAllowed(chainId, "operation", tx);
       assertTransition(ticket.status, "left");
 
       const before = { status: ticket.status };
@@ -645,6 +662,9 @@ export async function reassignBarber(
     const ticketId = await db.transaction(async (tx) => {
       const ticket = await getTicketOrThrow(tx, parsed.data.ticketId);
       const { chainId, locationId, userId } = await requireLocationScope(ticket.locationId);
+
+      // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+      await enforceAreaAllowed(chainId, "operation", tx);
 
       if (ticket.status !== "waiting" && ticket.status !== "called") {
         throw new Error("Solo se puede reasignar barbero a un turno en espera o llamado.");

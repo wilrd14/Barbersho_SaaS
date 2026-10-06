@@ -22,6 +22,7 @@ import { z } from "zod";
 import { writeAuditLog } from "@/lib/auth/audit";
 import { requireChainScope } from "@/lib/auth/guards";
 import { bpsFromPercentString } from "@/lib/commissions";
+import { assertAreaAllowed } from "@/lib/billing/gate";
 import { db } from "@/lib/db/client";
 import { barberLocations, commissionRules, locations } from "@/lib/db/schema";
 import { decimalStringFromCents } from "@/lib/actions/money-utils";
@@ -122,6 +123,9 @@ export async function createCommissionRuleAction(input: unknown): Promise<Action
 
   const scope = await requireChainScope();
 
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
+
   try {
     const ruleId = await db.transaction(async (tx) => {
       if (parsed.data.appliesTo === "chain") {
@@ -170,6 +174,9 @@ export async function updateCommissionRuleAction(input: unknown): Promise<Action
 
   const scope = await requireChainScope();
 
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
+
   try {
     await db.transaction(async (tx) => {
       const [before] = await tx
@@ -216,6 +223,9 @@ export async function deleteCommissionRuleAction(input: unknown): Promise<Action
   if (!parsed.success) return actionError(firstIssue(parsed.error));
 
   const scope = await requireChainScope();
+
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     await db.transaction(async (tx) => {
@@ -288,6 +298,9 @@ export async function assignBarberLocationRuleAction(
   if (!parsed.success) return actionError(firstIssue(parsed.error));
 
   const scope = await requireChainScope();
+
+  const gate = await assertAreaAllowed(scope.chainId, "analytics", db);
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     const barberLocationId = await db.transaction(async (tx) => {

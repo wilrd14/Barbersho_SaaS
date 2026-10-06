@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { zUuid } from "@/lib/validation/id";
 
+import { assertAreaAllowed } from "@/lib/billing/gate";
 import { db } from "@/lib/db/client";
 import { appointments, clients } from "@/lib/db/schema";
 import { requireLocationScope, type LocationScopeContext } from "@/lib/auth/guards";
@@ -72,6 +73,10 @@ export async function transitionAppointmentAction(
   const { locationId, appointmentId, action, cancellationReason } = parsed.data;
 
   const scope = await requireLocationScope(locationId);
+
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(scope.chainId, "operation", db);
+  if (!gate.ok) return actionError(gate.error);
 
   if (action === "cancel" && !cancellationReason) {
     return actionError("Cancelar una cita exige un motivo.");
@@ -177,6 +182,10 @@ export async function createAppointmentAction(
   }
 
   const scope = await requireLocationScope(data.locationId);
+
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(scope.chainId, "operation", db);
+  if (!gate.ok) return actionError(gate.error);
   assertCanActOnBarber(scope, data.barberId);
 
   const effective = await resolveEffectiveServiceFor(scope.locationId, data.serviceId, data.barberId);
@@ -312,6 +321,10 @@ export async function rescheduleAppointmentAction(
   const { locationId, appointmentId, newStartsAt, newBarberId } = parsed.data;
 
   const scope = await requireLocationScope(locationId);
+
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(scope.chainId, "operation", db);
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     const result = await db.transaction(async (tx) => {

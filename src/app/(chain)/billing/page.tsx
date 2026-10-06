@@ -1,9 +1,8 @@
 import { eq } from "drizzle-orm"
 import { BillingPlanCard } from "@/components/kortex/billing-plan-card"
-import { ScopeBanner } from "@/components/kortex/scope-banner"
 import { EmptyState } from "@/components/ui/empty-state"
 import { requireChainScope } from "@/lib/auth/guards"
-import { effectiveSubscription, type EffectiveAccess, type SubscriptionStatus } from "@/lib/billing"
+import { effectiveSubscription } from "@/lib/billing"
 import { db } from "@/lib/db/client"
 import { locations, subscriptions } from "@/lib/db/schema"
 
@@ -16,26 +15,6 @@ function currentTimeMs(): number {
 function whatsappHref(): string | null {
   const digits = (process.env.NEXT_PUBLIC_WHATSAPP_SALES ?? "").replace(/\D/g, "")
   return digits.length >= 8 ? `https://wa.me/${digits}` : null
-}
-
-function bannerMessage(
-  status: SubscriptionStatus,
-  access: EffectiveAccess,
-  trialDaysLeft: number | null,
-  graceDaysLeft: number | null,
-): string | null {
-  if (access === "bloqueado") {
-    return "El acceso está bloqueado. Escríbenos para reactivar el plan; lo que montaste sigue guardado."
-  }
-  if (access === "restringido") {
-    return graceDaysLeft === null
-      ? "Tu plan necesita atención. Sigues operando, pero el análisis y la administración están en pausa."
-      : `Tu prueba terminó. Te quedan ${graceDaysLeft} ${graceDaysLeft === 1 ? "día" : "días"} de gracia: sigues operando, pero el análisis está en pausa.`
-  }
-  if (status === "trialing" && trialDaysLeft !== null && trialDaysLeft <= 7) {
-    return `Te quedan ${trialDaysLeft} ${trialDaysLeft === 1 ? "día" : "días"} de prueba. Si activas el plan, no pierdes nada de lo que montaste.`
-  }
-  return null
 }
 
 /**
@@ -69,11 +48,9 @@ export default async function BillingPage() {
     },
     currentTimeMs(),
   )
-  const banner = bannerMessage(sub.status, effective.access, effective.trialDaysLeft, effective.graceDaysLeft)
 
   return (
     <>
-      {banner ? <ScopeBanner variant="trial-ending" message={banner} /> : null}
       <div className="mx-auto flex max-w-[720px] flex-col gap-4 p-4">
         <h1 className="text-h1">Tu plan</h1>
         <BillingPlanCard

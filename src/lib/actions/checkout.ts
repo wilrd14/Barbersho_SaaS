@@ -36,6 +36,7 @@ import { z } from "zod";
 import { zUuid } from "@/lib/validation/id";
 import { and, eq, isNull, sql } from "drizzle-orm";
 
+import { assertAreaAllowed } from "@/lib/billing/gate";
 import { db } from "@/lib/db/client";
 import {
   appointments,
@@ -318,6 +319,10 @@ export async function createSaleAction(input: unknown): Promise<ActionResult<Cre
 
   const scope = await requireLocationScope(data.locationId);
 
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(scope.chainId, "operation", db, "charge_open_sale");
+  if (!gate.ok) return actionError(gate.error);
+
   if (scope.effectiveRole === "barber_assigned") {
     const otherBarberLine = data.lines.find((l) => l.barberId !== scope.userId);
     if (otherBarberLine) {
@@ -566,6 +571,10 @@ export async function voidSaleAction(input: unknown): Promise<ActionResult<{ sal
   if (!parsed.success) return actionError(parsed.error.issues[0]?.message ?? "Datos invalidos.");
 
   const scope = await requireLocationScope(parsed.data.locationId);
+
+  // F3-18 (D-F3-16): con bloqueo total la operacion se pausa; en restringido sigue.
+  const gate = await assertAreaAllowed(scope.chainId, "operation", db);
+  if (!gate.ok) return actionError(gate.error);
 
   try {
     assertManagerRole(scope);
