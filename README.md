@@ -3,8 +3,8 @@
 SaaS de gestion operativa multi-sede para cadenas de barberias (W-Tech).
 Este repo contiene el scaffold de **Sprint 1** (fundacion tecnica): Next.js 15+
 (App Router) + TypeScript + Tailwind v4 + shadcn/ui, Drizzle ORM con las 26
-tablas de `PRD-BarberShop.md` §10, autenticacion multi-rol sobre Supabase Auth
-y el guard de autorizacion por ambito de ruta. Ver `BACKLOG-BACKEND.md` para
+tablas de `docs/PRD-BarberShop.md` §10, autenticacion multi-rol sobre Supabase Auth
+y el guard de autorizacion por ambito de ruta. Ver `docs/BACKLOG-BACKEND.md` para
 el detalle completo de alcance, decisiones y checklist de este sprint.
 
 ## Stack
@@ -123,3 +123,8 @@ algun rango llega a `--limit-ms` (2000 por defecto). Requiere `.env.local` real.
 Ver el reporte de cierre de sprint (entregado por el desarrollador al PM) para
 el detalle de que tareas del checklist S1-01..S1-16 quedaron completas, cuales
 no, y por que.
+
+## Documentacion
+
+Todos los documentos de producto, diseno y backlog viven en [`docs/`](docs/):
+PRD, BRAND-BRIEF, UX-BRIEF, DESIGN-SYSTEM, BACKLOG-BACKEND/F2/F3/F4 y CHANGELOG.
