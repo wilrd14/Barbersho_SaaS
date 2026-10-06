@@ -33,6 +33,8 @@ export interface DailyMetricsRow {
   /** Ventas `paid` del dia (denominador del ticket promedio). */
   salesCount: number;
   newClients: number;
+  /** Clientes distintos con al menos una venta `paid` ese dia (D-F3-13). */
+  uniqueClients: number;
   noShows: number;
   /** completed + no_show + cancelled del dia (denominador de la tasa de no-show). */
   terminalAppointments: number;
@@ -62,6 +64,12 @@ export interface LocationPeriodTotals {
   /** noShows / terminalAppointments; null si no hubo citas terminales. */
   noShowBps: number | null;
   newClients: number;
+  /**
+   * Suma de `uniqueClients` de cada dia (visitas-cliente por dia): un cliente que
+   * viene dos dias cuenta dos veces. Los clientes distintos de un rango no se
+   * pueden derivar de filas diarias sin duplicar.
+   */
+  uniqueClients: number;
   barberHoursX100: number;
   /** Ingreso del periodo / sillas; null si chairsCount <= 0. */
   revenuePerChairCents: number | null;
@@ -77,6 +85,8 @@ export interface ChainPeriodTotals {
   occupancyBps: number | null;
   noShowBps: number | null;
   newClients: number;
+  /** Suma de visitas-cliente por dia de las sedes (ver `LocationPeriodTotals.uniqueClients`). */
+  uniqueClients: number;
 }
 
 export interface CivilRange {
@@ -197,6 +207,7 @@ export function aggregateLocation(rows: DailyMetricsRow[], location: LocationInf
     noShows,
     noShowBps: terminal > 0 ? roundHalfToEven(noShows * 10000, terminal) : null,
     newClients: sum((r) => r.newClients),
+    uniqueClients: sum((r) => r.uniqueClients),
     barberHoursX100,
     revenuePerChairCents: location.chairsCount > 0 ? roundHalfToEven(revenueCents, location.chairsCount) : null,
     revenuePerBarberHourCents:
@@ -224,6 +235,7 @@ export function aggregateChain(
     occupancyBps: meanBps(own.flatMap((r) => (r.utilizationBps === null ? [] : [r.utilizationBps]))),
     noShowBps: terminal > 0 ? roundHalfToEven(noShows * 10000, terminal) : null,
     newClients: locations.reduce((acc, l) => acc + l.newClients, 0),
+    uniqueClients: locations.reduce((acc, l) => acc + l.uniqueClients, 0),
   };
 }
 

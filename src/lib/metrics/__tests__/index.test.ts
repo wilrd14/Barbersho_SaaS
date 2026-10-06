@@ -17,6 +17,7 @@ function row(over: Partial<DailyMetricsRow> & { locationId: string; date: string
     servicesCount: 0,
     salesCount: 0,
     newClients: 0,
+    uniqueClients: 0,
     noShows: 0,
     terminalAppointments: 0,
     utilizationBps: null,
@@ -110,6 +111,7 @@ describe("aggregateLocation", () => {
       servicesCount: 4,
       salesCount: 3,
       newClients: 1,
+      uniqueClients: 4,
       noShows: 1,
       terminalAppointments: 5,
       utilizationBps: 7000,
@@ -121,6 +123,7 @@ describe("aggregateLocation", () => {
       revenueCents: 500_01,
       servicesCount: 2,
       salesCount: 2,
+      uniqueClients: 2,
       noShows: 0,
       terminalAppointments: 5,
       utilizationBps: 8000,
@@ -140,6 +143,7 @@ describe("aggregateLocation", () => {
     expect(t.noShows).toBe(1);
     expect(t.noShowBps).toBe(1000); // 1 de 10
     expect(t.newClients).toBe(1);
+    expect(t.uniqueClients).toBe(6); // suma de visitas-cliente por dia
     expect(t.barberHoursX100).toBe(1600);
     expect(t.revenuePerChairCents).toBe(25_000); // 150001/6 = 25000.17
     expect(t.revenuePerBarberHourCents).toBe(9375); // 150001*100/1600 = 9375.06
@@ -170,8 +174,8 @@ describe("aggregateLocation", () => {
 describe("aggregateChain", () => {
   it("pondera ticket y no-show, no promedia promedios", () => {
     const rows = [
-      row({ locationId: "naco", date: "d", revenueCents: 100_000, salesCount: 1, noShows: 1, terminalAppointments: 2, utilizationBps: 6000, newClients: 2, servicesCount: 1 }),
-      row({ locationId: "sc", date: "d", revenueCents: 90_000, salesCount: 9, noShows: 0, terminalAppointments: 8, utilizationBps: 8000, newClients: 1, servicesCount: 9 }),
+      row({ locationId: "naco", date: "d", revenueCents: 100_000, salesCount: 1, noShows: 1, terminalAppointments: 2, utilizationBps: 6000, newClients: 2, uniqueClients: 1, servicesCount: 1 }),
+      row({ locationId: "sc", date: "d", revenueCents: 90_000, salesCount: 9, noShows: 0, terminalAppointments: 8, utilizationBps: 8000, newClients: 1, uniqueClients: 7, servicesCount: 9 }),
       row({ locationId: "fuera", date: "d", revenueCents: 1_000_000, salesCount: 1 }),
     ];
     const locs = [aggregateLocation(rows, NACO), aggregateLocation(rows, SC)];
@@ -182,6 +186,7 @@ describe("aggregateChain", () => {
     expect(chain.noShowBps).toBe(1000); // 1 de 10
     expect(chain.occupancyBps).toBe(7000);
     expect(chain.newClients).toBe(3);
+    expect(chain.uniqueClients).toBe(8);
     expect(chain.servicesCount).toBe(10);
   });
 
