@@ -54,9 +54,12 @@ describe("Vista Cadena (F3-13/F3-20, DB real)", () => {
 
   it("es determinista: dos llamadas seguidas devuelven exactamente lo mismo", async () => {
     const params = { chainId: CHAIN, range: RANGE, today: TODAY };
-    const a = await loadChainOverview(params, db);
-    const b = await loadChainOverview(params, db);
-    expect(b).toEqual(a);
+    // Rango historico sin materializar: dentro de rollback para no dejar filas en location_daily_metrics.
+    await inRolledBackTx(async (tx) => {
+      const a = await loadChainOverview(params, tx);
+      const b = await loadChainOverview(params, tx);
+      expect(b).toEqual(a);
+    });
   }, 40000);
 
   it("otra cadena no ve nada: cero sedes, cero ingreso, sin top barberos ni servicios", async () => {
@@ -72,9 +75,11 @@ describe("Vista Cadena (F3-13/F3-20, DB real)", () => {
 
   it("el ingreso de la cadena es la suma de sus sedes (no se mezcla con otra cadena)", async () => {
     const range = { startsOn: "2026-01-01", endsOn: "2026-01-07" };
-    const o = await loadChainOverview({ chainId: CHAIN, range, today: TODAY }, db);
-    const sum = o.positions.reduce((acc, p) => acc + p.revenueCents, 0);
-    expect(o.chain.revenueCents).toBe(sum);
+    await inRolledBackTx(async (tx) => {
+      const o = await loadChainOverview({ chainId: CHAIN, range, today: TODAY }, tx);
+      const sum = o.positions.reduce((acc, p) => acc + p.revenueCents, 0);
+      expect(o.chain.revenueCents).toBe(sum);
+    });
   }, 40000);
 });
 

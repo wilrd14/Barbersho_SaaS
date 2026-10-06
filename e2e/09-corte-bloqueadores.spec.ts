@@ -111,7 +111,7 @@ test.describe.serial("Corte de Quincena: bloqueadores", () => {
     await page.getByRole("button", { name: "Calcular el corte" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Corte calculado." })).toBeVisible({ timeout: 60_000 });
 
-    await expect(page.getByText("todavía está corriendo")).toBeVisible();
+    await expect(page.getByText("todavía está corriendo").first()).toBeVisible();
     await expect(page.getByRole("button", { name: "Cerrar el corte" })).toBeDisabled();
 
     const [row] = await testDb.select({ status: payoutPeriods.status }).from(payoutPeriods).where(eq(payoutPeriods.id, currentPeriodId));

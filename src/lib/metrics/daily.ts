@@ -99,7 +99,7 @@ async function loadLocationFacts(
   return { ...r, dow: Number(r.dow) };
 }
 
-/** Calcula el dia desde `sales`/`appointments`/`schedules` (4 consultas secuenciales con `facts`). */
+/** Calcula el dia desde `sales`/`appointments`/`schedules` (1 sentencia con CTEs, ademas de `facts`). */
 async function computeFromSource(
   locationId: string,
   date: string,
@@ -108,60 +108,68 @@ async function computeFromSource(
 ): Promise<{ row: DailyMetricsRow; anomalous: boolean }> {
   const tz = facts.timezone;
 
-  const salesRows = await executor.execute<{
+  // Una sola sentencia (3 CTEs de una fila cada una): 1 round-trip en vez de 3 (P95 de Vista Cadena, PRD §15).
+  const rows = await executor.execute<{
     revenue: string;
     sales_count: number;
     services: number;
     unique_clients: number;
     new_clients: number;
+    no_shows: number;
+    terminal: number;
+    served_min: number;
+    minutes: number;
   }>(sql`
-    select
-      coalesce(sum(s.subtotal - s.discount_amount), 0)::text as revenue,
-      count(*)::int as sales_count,
-      coalesce(sum(it.qty), 0)::int as services,
-      (count(distinct s.client_id))::int as unique_clients,
-      (count(distinct s.client_id) filter (where (c.created_at at time zone ${tz})::date = ${date}::date))::int as new_clients
-    from sales s
-    left join clients c on c.id = s.client_id
-    left join lateral (
-      select sum(si.quantity) as qty from sale_items si where si.sale_id = s.id and si.type = 'service'
-    ) it on true
-    where s.location_id = ${locationId}
-      and s.status = 'paid'
-      and (s.created_at at time zone ${tz})::date = ${date}::date
-  `);
-
-  const apptRows = await executor.execute<{ no_shows: number; terminal: number; served_min: number }>(sql`
-    select
-      (count(*) filter (where status = 'no_show'))::int as no_shows,
-      (count(*) filter (where status in ('completed', 'no_show', 'cancelled')))::int as terminal,
-      coalesce(sum(extract(epoch from (ends_at - starts_at)) / 60) filter (where status = 'completed'), 0)::int as served_min
-    from appointments
-    where location_id = ${locationId}
-      and (starts_at at time zone ${tz})::date = ${date}::date
-  `);
-
-  const hoursRows = await executor.execute<{ minutes: number }>(sql`
-    with blocks as (
+    with sl as (
+      select
+        coalesce(sum(s.subtotal - s.discount_amount), 0)::text as revenue,
+        count(*)::int as sales_count,
+        coalesce(sum(it.qty), 0)::int as services,
+        (count(distinct s.client_id))::int as unique_clients,
+        (count(distinct s.client_id) filter (where (c.created_at at time zone ${tz})::date = ${date}::date))::int as new_clients
+      from sales s
+      left join clients c on c.id = s.client_id
+      left join lateral (
+        select sum(si.quantity) as qty from sale_items si where si.sale_id = s.id and si.type = 'service'
+      ) it on true
+      where s.location_id = ${locationId}
+        and s.status = 'paid'
+        and (s.created_at at time zone ${tz})::date = ${date}::date
+    ),
+    ap as (
+      select
+        (count(*) filter (where status = 'no_show'))::int as no_shows,
+        (count(*) filter (where status in ('completed', 'no_show', 'cancelled')))::int as terminal,
+        coalesce(sum(extract(epoch from (ends_at - starts_at)) / 60) filter (where status = 'completed'), 0)::int as served_min
+      from appointments
+      where location_id = ${locationId}
+        and (starts_at at time zone ${tz})::date = ${date}::date
+    ),
+    blocks as (
       select sc.user_id,
              ((${date}::date + sc.start_time) at time zone ${tz}) as bstart,
              ((${date}::date + sc.end_time) at time zone ${tz}) as bend
       from schedules sc
       where sc.location_id = ${locationId} and sc.is_active and sc.day_of_week = ${facts.dow}
+    ),
+    hr as (
+      select coalesce(sum(greatest(0, extract(epoch from (b.bend - b.bstart)) / 60 - coalesce(ov.m, 0))), 0)::int as minutes
+      from blocks b
+      left join lateral (
+        select sum(greatest(0, extract(epoch from (least(t.ends_at, b.bend) - greatest(t.starts_at, b.bstart))) / 60)) as m
+        from time_off t
+        where t.user_id = b.user_id and t.status = 'approved'
+          and (t.location_id is null or t.location_id = ${locationId})
+          and t.starts_at < b.bend and t.ends_at > b.bstart
+      ) ov on true
     )
-    select coalesce(sum(greatest(0, extract(epoch from (b.bend - b.bstart)) / 60 - coalesce(ov.m, 0))), 0)::int as minutes
-    from blocks b
-    left join lateral (
-      select sum(greatest(0, extract(epoch from (least(t.ends_at, b.bend) - greatest(t.starts_at, b.bstart))) / 60)) as m
-      from time_off t
-      where t.user_id = b.user_id and t.status = 'approved'
-        and (t.location_id is null or t.location_id = ${locationId})
-        and t.starts_at < b.bend and t.ends_at > b.bstart
-    ) ov on true
+    select sl.revenue, sl.sales_count, sl.services, sl.unique_clients, sl.new_clients,
+           ap.no_shows, ap.terminal, ap.served_min, hr.minutes
+    from sl, ap, hr
   `);
 
-  const s = salesRows[0];
-  const a = apptRows[0];
+  const s = rows[0];
+  const a = rows[0];
   const util = utilizationBps(a.served_min, facts.chairsCount, openMinutes(facts.businessHours, facts.dow));
 
   return {
@@ -177,7 +185,7 @@ async function computeFromSource(
       noShows: a.no_shows,
       terminalAppointments: a.terminal,
       utilizationBps: util?.bps ?? null,
-      barberHoursX100: roundHalfToEven(hoursRows[0].minutes * 100, 60),
+      barberHoursX100: roundHalfToEven(s.minutes * 100, 60),
     },
   };
 }
