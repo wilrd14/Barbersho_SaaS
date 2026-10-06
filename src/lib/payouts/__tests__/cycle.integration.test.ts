@@ -331,7 +331,8 @@ describe("approvePeriodInTx / markPeriodPaidInTx (F3-05)", () => {
       expect(await approvePeriodInTx(tx, { ...scopeArgs, periodId, todayIso: TODAY })).toEqual({ ok: false, error: expect.stringContaining("ya está pagado") });
 
       const actions = (await auditActions(tx, periodId)).map((a) => a.action);
-      expect(actions).toEqual(["payout.create", "payout.calculate", "payout.approve", "payout.mark_paid"]);
+      // Dentro de una transaccion now() es constante: created_at empata y el orden de lectura no esta garantizado.
+      expect([...actions].sort()).toEqual(["payout.approve", "payout.calculate", "payout.create", "payout.mark_paid"]);
       const approveAudit = (await auditActions(tx, periodId)).find((a) => a.action === "payout.approve")!;
       expect(approveAudit.before).toEqual({ status: "calculated", approvedBy: null });
       expect(approveAudit.after).toMatchObject({ status: "approved", approvedBy: IDS.owner, totalNetCents: -724834 });

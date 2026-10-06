@@ -2,11 +2,10 @@
 
 ## 2026-10-06 — Cierre de F3 (F3-04..F3-19): El Corte, Vista Cadena, Tabla de Posiciones, drill-down, gate de suscripcion y Tu plan
 
-Todo sobre `main` en GitHub. Falta **F3-20 completo**: el E2E de cerrar periodo y las
-pruebas de integracion nuevas estan escritas pero **no se han corrido** (sin
-credenciales de BD en esta maquina), y el P95 no esta medido. Esta entrada
-documenta lo construido, lo decidido sin respaldo explicito y, sobre todo, **que
-NO se ha verificado**.
+Todo sobre `main` en GitHub. **Actualizacion del mismo dia:** con las credenciales de BD
+ya configuradas, F3-20 se verifico contra la DB real (ver "Verificacion contra la DB
+real (6 oct)" mas abajo): suite completa, E2E, backfill y P95 medidos. Esta entrada
+documenta lo construido, lo decidido sin respaldo explicito y lo que sigue pendiente.
 
 ### Construido (commits)
 
@@ -29,7 +28,8 @@ NO se ha verificado**.
 
 Esta tanda (F3-20, medicion): `scripts/measure-chain-overview.ts` y
 `npm run metrics:measure` (backfill de 35 dias, p50/p95/max de hoy/semana/mes,
-falla si P95 >= 2000 ms), documentado en el README. **Escrito, no ejecutado.**
+falla si P95 >= 2000 ms), documentado en el README. Ejecutado despues contra la DB
+real (ver la seccion de verificacion).
 
 ### Verificado
 
@@ -44,29 +44,72 @@ falla si P95 >= 2000 ms), documentado en el README. **Escrito, no ejecutado.**
   - Ingreso del 16-sep (tz de la sede): Naco RD$6,850.00 / 14 ventas; Bella Vista
     RD$2,700.00 / 5 (la venta `refunded` de RD$350 queda fuera); San Cristobal
     RD$1,900.00 / 4.
-  - Vista Cadena 10-16 sep: RD$64,912.49 en 131 ventas = suma por sede = suma de
-    lineas menos descuentos; el neto de Top barberos suma el mismo total.
+  - Vista Cadena 10-16 sep (seed anterior): RD$64,912.49 en 131 ventas = suma por sede =
+    suma de lineas menos descuentos; el neto de Top barberos suma el mismo total. (Cifra
+    historica: tras re-sembrar el mismo dia las ventas cambiaron de fecha; ver las cifras
+    nuevas en la seccion de verificacion.)
   - Borde de zona horaria probado con timestamps literales (03:45 UTC = 23:45 local
     cae en el dia 16; 04:15 UTC = 00:15 local cae en el 17). El seed no tiene ventas
     reales cerca de medianoche.
 
-### NO verificado contra una BD real (pendiente de verificar)
+### Verificacion contra la DB real (6 oct)
 
-`.env.local` tiene aun `REEMPLAZAR_*` (anon key, service role, password de la BD),
-asi que nada que use `DATABASE_URL` ha corrido:
+Con `.env.local` ya con credenciales reales, lo que antes estaba "sin correr" se ejecuto:
 
-- **Escrituras de `daily.ts`**: `upsert` y `metrics:backfill` (`location_daily_metrics`
-  sigue en 0 filas), y su idempotencia.
-- **P95 de Vista Cadena** (< 2 s, PRD §15) y los round-trips reales de los loaders.
-- Las **paginas con datos** (`/overview`, `/compare`, `/billing`, El Dia) en navegador,
-  y que el ingreso de El Dia coincida al centavo con la Tabla de Posiciones.
-- **Gate de suscripcion con la suscripcion del seed**: solo hay pruebas con ejecutor falso.
-- **Pruebas de integracion nuevas** (`daily.integration.test.ts`, `cycle.*`,
-  `payout-periods.*`, `commission-rules.*`, etc.) y el **E2E `08-corte-quincena`**
-  (flujo critico "cerrar periodo", PRD §15): escritos, **no corridos en esta sesion**.
-  En la suite sin credenciales fallan solo las que necesitan la BD
-  (`cycle.invariant`, `f3-integrity`).
-- `billing:set-status` contra la BD real y el banner de lectura+ en navegador.
+- **Vitest completo: 37 archivos / 402 tests en verde** (integracion, `f3-integrity`,
+  `cycle.*`, concurrencia, seed). **Playwright 13/13** (incluye `02-dar-turno`, que estaba
+  en rojo, y `08`/`09` del Corte). **Build: 27 paginas.** Typecheck y eslint sin errores.
+  Baseline de la BD (`scripts/db-baseline.ts`) **identica antes y despues**.
+- **Backfill de 35 dias**: 210 dias-sede en 2m48.
+- **P95 de Vista Cadena** (`metrics:measure`, 30 corridas, medido desde la maquina dev hacia
+  ca-central-1, asi que sobreestima produccion): ~3.3 s con el codigo original -> 2.03-2.04 s
+  al fusionar las consultas del dia en una sentencia con CTEs -> **~0.76-0.84 s de p95 con
+  ~5 round-trips** (antes ~15) tras `computeLiveDailyRows`, lectura por bloque del rango actual
+  y anterior, y top servicios/barberos desde una sola consulta. Cumple el AC < 2 s.
+- **Cifras de Vista Cadena 10-16 sep tras el re-seed**, verificadas contra SQL independiente
+  por MCP: Naco RD$32,107.50, Bella Vista RD$21,242.50, San Cristobal RD$11,335.00 (134
+  ventas). Top servicios identico.
+- **Migraciones 0000-0004 ya estaban aplicadas** (26 tablas, 29 policies, 0 tablas sin RLS;
+  tracking de drizzle con 0001-0004). Mi diagnostico inicial de "BD vacia" fue erroneo (la
+  consulta se hizo durante `COMING_UP`); el proyecto se reactivo y no hubo nada que aplicar.
+
+**Arreglos hechos durante la verificacion:** `DATABASE_URL`/`DIRECT_URL` de `.env.local`
+estaban sin host; `testTimeout`/`hookTimeout` de 30 s en `vitest.config.ts`; los tests de
+`chain-overview` ahora van en rollback (ensuciaban `location_daily_metrics`); selector
+ambiguo en `e2e/09-corte-bloqueadores.spec.ts`; `cycle.integration.test.ts:335` ya no depende
+del orden de `audit_log` (dentro de una transaccion `now()` es constante y `created_at`
+empata). Seed viejo (del 18-sep) hacia fallar dos tests: se resolvio con `npm run db:seed`.
+
+**A vigilar:** una vez fallo "dos calculos simultaneos del mismo periodo" (concurrencia de
+F3-05, `cycle.integration`) en la primera corrida completa y no se reprodujo en 2 corridas
+siguientes (`src/lib/payouts`: 52/52). Posible flake de tiempos; no investigado.
+
+**Incidentes:**
+- La contrasena de la BD se imprimio por error en la salida de una sesion; Williams la roto.
+  No consta en el repo (comprobado: 0 archivos rastreados la contienen; `.env.local` esta
+  ignorado por git).
+- El pooler de Supabase activo `ECIRCUITBREAKER` (bloqueo temporal de conexiones nuevas) por
+  intentos con contrasena de relleno y luego con contrasenas distintas en `DATABASE_URL` y
+  `DIRECT_URL`. Se resolvio unificando la contrasena en ambas lineas.
+- **21 filas viejas** en `location_daily_metrics` (dic-2025..ene-2026), de rangos de prueba,
+  siguen en la tabla: el borrado por SQL fue denegado por el clasificador de permisos y
+  **queda a cargo de Williams**. No afectan a los tests.
+
+### Aun no verificado
+
+- Las **paginas con datos** (`/overview`, `/compare`, `/billing`, El Dia) a ojo en navegador,
+  y que el ingreso de El Dia coincida al centavo con la Tabla de Posiciones (cubierto por
+  codigo compartido y SQL, no por una comparacion visual).
+- **Gate de suscripcion con la suscripcion del seed** en un E2E (hay pruebas de integracion
+  y con ejecutor falso).
+- `billing:set-status` y el banner de lectura+ en navegador.
+
+### Como retomar
+
+`npm run db:seed` (si el seed es viejo; los datos se anclan a la fecha) -> `npm run test`
+-> `npx playwright test` (puerto 3100 por defecto) -> `npm run metrics:measure` (P95 < 2 s).
+Credenciales solo en `.env.local` (ignorado por git); misma contrasena en `DATABASE_URL` y
+`DIRECT_URL`.
 
 ### Decisiones sin respaldo explicito en el backlog
 
@@ -102,7 +145,7 @@ asi que nada que use `DATABASE_URL` ha corrido:
   `SECURITY DEFINER` y ejecutables por `anon` y `authenticated` (revocar `EXECUTE` a `anon`
   exige una migracion que **no esta autorizada en el backlog: escalar al PM**);
   `btree_gist` instalado en `public`; la proteccion contra contrasenas filtradas de
-  Auth esta desactivada. Ninguna advertencia de "RLS disabled".
+  Auth esta desactivada. Ninguna advertencia de "RLS disabled". Siguen sin tratar.
 - El proyecto Supabase estaba **INACTIVE (pausado)** y se reactivo el 2026-10-06. Una
   consulta hecha mientras levantaba (`COMING_UP`) dio un resultado falso de "BD vacia";
   fue un error de diagnostico, la BD esta intacta (seed: 614 ventas, 11 usuarios de Auth).
@@ -110,7 +153,9 @@ asi que nada que use `DATABASE_URL` ha corrido:
 ### Riesgos y deuda abiertos de F3
 
 - **F3 no es "MVP vendible"** (BACKLOG-F3 §1/D-F3-19): faltan las pantallas CRUD de F1
-  (sedes, equipo, servicios, horarios, onboarding) y el email transaccional (§16.10). F4.
+  (sedes, equipo, servicios, horarios, onboarding) y el email transaccional (§16.10), mas la
+  decision de pasarela de pago (D11). Es el contenido de F4.
+- Claves `service_role`/`sb_secret` originales sin rotar (ver Seguridad).
 - **Alquiler de silla sin ventas**: un barbero de silla fija sin ventas ni propinas en la
   quincena no genera linea y no se le imputa renta (preguntar al PM).
 - **Ajustes manuales se pierden al recalcular**: `adjustments` sale en 0 del motor y
